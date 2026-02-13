@@ -8,6 +8,17 @@ const TelegramBot = require('node-telegram-bot-api');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 8080;
+
+app.get('/', (req, res) => {
+  res.send('Sync Hearts Bot is running!');
+});
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
 // =========================================================
 // 🔴 CONFIGURATION
 // =========================================================
