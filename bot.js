@@ -1,25 +1,23 @@
 /**
- * SYNC HEARTS AGENCY - PROFESSIONAL BACKEND
- * * Features:
- * 1. Hybrid AI/Human Routing (Ghost Relay)
- * 2. SQLite Database for Persistence
- * 3. Admin "God Mode" Dashboard
+ * SYNC HEARTS AGENCY - FINAL PRODUCTION BACKEND
+ * Features: Admin Takeover, AI Fallback, Credit System, Image Management
  */
 
+require('dotenv').config(); 
 const TelegramBot = require('node-telegram-bot-api');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
-const fs = require('fs');
 
 // =========================================================
-// 🔴 CONFIGURATION (EDIT THESE)
+// 🔴 CONFIGURATION
 // =========================================================
-const BOT_TOKEN = '8577711169:AAE8Av0ADtel8-4IbreUJe_08g-DenIhHXw'; 
-const ADMIN_ID = 7640605912; // Your Personal Telegram ID
-const WEBAPP_URL = 'https://placidbarry.github.io/sync-hearts-app/'; 
+// Replace these with your actual details
+const BOT_TOKEN = process.env.BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
+const ADMIN_ID = parseInt(process.env.ADMIN_ID) || 7640605912; // Your ID from the upload
+const WEBAPP_URL = process.env.WEBAPP_URL || 'https://placidbarry.github.io/sync-hearts-app/';
 
 // =========================================================
-// 1. DATABASE INITIALIZATION
+// 1. DATABASE SETUP (Auto-creates agency.db)
 // =========================================================
 let db;
 
@@ -29,34 +27,31 @@ async function initDb() {
         driver: sqlite3.Database
     });
 
-    // Users Table
+    // Users: Tracks credits and who they are currently chatting with
     await db.exec(`
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             first_name TEXT,
             username TEXT,
             credits INTEGER DEFAULT 50,
-            current_agent_name TEXT DEFAULT NULL,
-            joined_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            current_agent_name TEXT DEFAULT NULL
         );
     `);
 
-    // Agents Configuration Table (For Online/Offline Status)
+    // Agents: Tracks if YOU (the human) are online for them
     await db.exec(`
         CREATE TABLE IF NOT EXISTS agents (
             name TEXT PRIMARY KEY,
-            is_online BOOLEAN DEFAULT 0,
-            auto_reply_style TEXT DEFAULT 'flirty'
+            image_url TEXT,
+            is_online BOOLEAN DEFAULT 0
         );
     `);
 
-    // Seed default agents if they don't exist
-    const agentList = ['Sophia', 'Elena', 'Jessica', 'Isabella'];
-    for (const agent of agentList) {
-        await db.run(`INSERT OR IGNORE INTO agents (name, is_online) VALUES (?, 0)`, agent);
-    }
+    // Seed Default Agents
+    await db.run(`INSERT OR IGNORE INTO agents (name, is_online) VALUES ('Sophia', 0)`);
+    await db.run(`INSERT OR IGNORE INTO agents (name, is_online) VALUES ('Elena', 0)`);
 
-    console.log('✅ Database connected. Agency is ready.');
+    console.log('✅ Database Ready. Agency Open.');
 }
 
 initDb();
@@ -64,193 +59,170 @@ initDb();
 const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // =========================================================
-// 2. WEB APP HANDLER (The Bridge)
+// 2. CONNECTION HANDLERS
 // =========================================================
 
-// Handle /start
+// Start Command
 bot.onText(/\/start/, async (msg) => {
     const chatId = msg.chat.id;
-    
-    // Ensure user exists
     await db.run(`INSERT OR IGNORE INTO users (user_id, credits) VALUES (?, 50)`, chatId);
     
-    bot.sendMessage(chatId, `🔥 **Welcome to Sync Hearts**\n\nTap below to find your perfect companion.`, {
+    bot.sendMessage(chatId, `🔥 **Welcome to the Agency**\n\nBrowse our models and choose your companion.`, {
         parse_mode: 'Markdown',
         reply_markup: {
-            inline_keyboard: [[{ text: "💋 Enter Agency", web_app: { url: WEBAPP_URL } }]]
+            inline_keyboard: [[{ text: "💋 View Models", web_app: { url: WEBAPP_URL } }]]
         }
     });
 });
 
-// Handle Data sent from the App (Registration & "Chat" clicks)
+// Handle WebApp Data (When user clicks in the App)
 bot.on('message', async (msg) => {
-    if (!msg.web_app_data) return;
+    if (msg.web_app_data) {
+        const chatId = msg.chat.id;
+        try {
+            const data = JSON.parse(msg.web_app_data.data);
 
-    const chatId = msg.chat.id;
-    const data = JSON.parse(msg.web_app_data.data);
-
-    // A. USER REGISTERED
-    if (data.action === 'register_new_user') {
-        const u = data.user_data;
-        await db.run(`
-            INSERT OR REPLACE INTO users (user_id, first_name, username, credits, current_agent_name)
-            VALUES (?, ?, ?, ?, ?)
-        `, [chatId, u.firstName, u.username, 50 + (data.bonus_credits || 0), null]);
-
-        bot.sendMessage(chatId, `✅ **Profile Created!**\n💰 Balance: 50 Coins.\n\nOpen the app again to pick a companion.`);
-        bot.sendMessage(ADMIN_ID, `🆕 **New User:** ${u.firstName} (${u.country})`);
-    }
-
-    // B. USER SELECTED "CHAT" OR SENT GIFT
-    if (data.action === 'interaction') {
-        const cost = data.cost;
-        const agentName = data.agent_name;
-        
-        // 1. Check Credits
-        const user = await db.get('SELECT credits FROM users WHERE user_id = ?', chatId);
-        if (!user || user.credits < cost) {
-            return bot.sendMessage(chatId, `❌ **Insufficient Credits**\nYou have ${user ? user.credits : 0} coins.`);
-        }
-
-        // 2. Deduct Credits & Set Active Agent
-        await db.run('UPDATE users SET credits = credits - ?, current_agent_name = ? WHERE user_id = ?', [cost, agentName, chatId]);
-
-        // 3. Send Confirmation (The "Chat Opened" Logic)
-        if (data.sub_type === 'text') {
-            await bot.sendMessage(chatId, `💬 **Connected with ${agentName}**\n\nShe is waiting... Type your message here directly in Telegram! 👇`);
-        } else {
-            // It was a gift/pic request
-            await bot.sendMessage(chatId, `✅ **${data.sub_type.toUpperCase()} Sent!**\n${agentName} received your request.`);
+            // Logic for when user selects an agent or action
+            // Assuming your frontend sends { action: 'select_agent', agent_name: 'Sophia' }
+            // or { action: 'interaction', agent_name: 'Sophia', cost: 10 }
             
-            // Allow user to chat now
-            await bot.sendMessage(chatId, `(You can now chat with ${agentName} here. Just type!)`);
-        }
-
-        // 4. Notify Admin
-        bot.sendMessage(ADMIN_ID, `💰 **Income: ${cost} Coins**\nUser: ${msg.from.first_name}\nAgent: ${agentName}\nAction: ${data.sub_type}`);
-    }
-});
-
-// =========================================================
-// 3. THE GHOST RELAY (Chat Routing)
-// =========================================================
-
-bot.on('message', async (msg) => {
-    // Ignore commands, web app data, and admin replies
-    if (msg.text && !msg.text.startsWith('/') && !msg.web_app_data && msg.chat.id !== ADMIN_ID) {
-        const userId = msg.chat.id;
-
-        // 1. Who is this user talking to?
-        const user = await db.get('SELECT * FROM users WHERE user_id = ?', userId);
-        
-        if (!user || !user.current_agent_name) {
-            return bot.sendMessage(userId, "⚠️ Please open the Agency App and select a girl to chat with first!");
-        }
-
-        const agentName = user.current_agent_name;
-
-        // 2. Check Agent Status (Online/Offline)
-        const agentConfig = await db.get('SELECT is_online FROM agents WHERE name = ?', agentName);
-        const isOnline = agentConfig ? agentConfig.is_online : 0;
-
-        // 3. Deduct 1 Credit for the message
-        if (user.credits < 1) {
-            return bot.sendMessage(userId, "❌ **Zero Balance.** Please buy credits.");
-        }
-        await db.run('UPDATE users SET credits = credits - 1 WHERE user_id = ?', userId);
-
-        // === SCENARIO A: AGENT IS ONLINE (Human Relay) ===
-        if (isOnline) {
-            // Forward to Admin so you can reply
-            // We include a hidden ID tag so the bot knows who to reply to later
-            const forwardText = `🔌 **LIVE CHAT**\nUser: ${user.first_name} (ID: ${userId})\nTo: ${agentName}\n\n"${msg.text}"`;
+            const agentName = data.agent_name || 'Sophia'; // Default to Sophia if missing
             
-            // We store the context in a way we can reply. 
-            // The simplest way is to force a Reply to the message in Telegram.
-            await bot.sendMessage(ADMIN_ID, forwardText);
-        } 
-        
-        // === SCENARIO B: AGENT IS OFFLINE (AI Fallback) ===
-        else {
-            // Simulate typing
-            bot.sendChatAction(userId, 'typing');
+            // Update User's Active Agent
+            await db.run('UPDATE users SET current_agent_name = ? WHERE user_id = ?', [agentName, chatId]);
+
+            bot.sendMessage(chatId, `💬 **You are now connected with ${agentName}.**\n\nShe is waiting for your message. Type below! 👇`);
             
-            // Simple Random AI Response (You can connect ChatGPT here later)
-            setTimeout(() => {
-                const replies = [
-                    "Mmm tell me more... 😘",
-                    "I was just thinking about you!",
-                    "You're cute. Send me a pic?",
-                    "I'm a bit busy but I love reading your texts.",
-                    "What are you wearing? 😈",
-                    "Come closer..."
-                ];
-                const randomReply = replies[Math.floor(Math.random() * replies.length)];
-                bot.sendMessage(userId, randomReply);
-            }, 2000); // 2 second delay
+        } catch (e) {
+            console.error("Error parsing WebApp data", e);
         }
     }
 });
 
 // =========================================================
-// 4. ADMIN GOD MODE (You replying)
+// 3. THE "GHOST RELAY" (Core Logic)
+// =========================================================
+
+bot.on('message', async (msg) => {
+    // Filter out commands, admin messages, and non-text
+    if (!msg.text || msg.text.startsWith('/') || msg.chat.id === ADMIN_ID || msg.web_app_data) return;
+
+    const userId = msg.chat.id;
+    const user = await db.get('SELECT * FROM users WHERE user_id = ?', userId);
+
+    // 1. Validate User
+    if (!user || !user.current_agent_name) {
+        return bot.sendMessage(userId, "⚠️ Please open the app and select a model first.");
+    }
+
+    if (user.credits < 1) {
+        return bot.sendMessage(userId, "❌ Out of credits. Please top up.");
+    }
+
+    // 2. Deduct Credit
+    await db.run('UPDATE users SET credits = credits - 1 WHERE user_id = ?', userId);
+
+    // 3. Check if Agent is Online (Human Mode)
+    const agent = await db.get('SELECT * FROM agents WHERE name = ?', user.current_agent_name);
+    const isHumanOnline = agent ? agent.is_online : 0;
+
+    if (isHumanOnline) {
+        // --- HUMAN MODE ---
+        // Forward message to ADMIN (You)
+        // We add a specific header so we know who to reply to
+        const forwardText = `🔌 **${user.current_agent_name} Relay**\nUser: ${user.first_name || 'Anon'} (ID: ${userId})\n\n"${msg.text}"`;
+        await bot.sendMessage(ADMIN_ID, forwardText);
+    } else {
+        // --- AI MODE (Fallback) ---
+        bot.sendChatAction(userId, 'typing');
+        setTimeout(async () => {
+            const reply = await getAiReply(msg.text, user.current_agent_name);
+            bot.sendMessage(userId, reply);
+        }, 2000); // 2-second simulated delay
+    }
+});
+
+// =========================================================
+// 4. ADMIN CONTROL (How you text back)
 // =========================================================
 
 // Handle Admin Replies
 bot.on('message', async (msg) => {
+    // Only accept messages from Admin that are Replies to another message
     if (msg.chat.id === ADMIN_ID && msg.reply_to_message) {
-        
-        // Parse the original message to find the User ID
-        // Format was: "User: Name (ID: 12345)"
         const originalText = msg.reply_to_message.text;
-        const idMatch = originalText.match(/ID: (\d+)/);
-
-        if (idMatch && idMatch[1]) {
-            const targetUserId = idMatch[1];
-            
-            // Send YOUR text to the User as the Bot
+        
+        // Extract User ID from the message you are replying to
+        // Format: "User: Name (ID: 12345)"
+        const match = originalText.match(/ID: (\d+)/);
+        
+        if (match && match[1]) {
+            const targetUserId = match[1];
+            // Send YOUR text to the user, appearing as the bot
             await bot.sendMessage(targetUserId, msg.text);
-            await bot.sendMessage(ADMIN_ID, "✅ Sent.");
+            await bot.sendMessage(ADMIN_ID, "✅ Sent as agent.");
         }
     }
 });
 
-// =========================================================
-// 5. ADMIN COMMANDS
-// =========================================================
-
-// Check Agents: /agents
-bot.onText(/\/agents/, async (msg) => {
+// Admin Commands
+bot.onText(/\/admin/, (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    const agents = await db.all('SELECT * FROM agents');
-    let report = "🕵️‍♀️ **Agent Status:**\n\n";
-    agents.forEach(a => {
-        report += `${a.name}: ${a.is_online ? '🟢 ONLINE' : '🔴 OFFLINE'}\n`;
-    });
-    bot.sendMessage(ADMIN_ID, report);
+    bot.sendMessage(ADMIN_ID, 
+        `👑 **Admin Dashboard**\n` +
+        `/online <name> - Take over chat\n` +
+        `/offline <name> - Return to AI\n` +
+        `/setimage <name> <url> - Change pic\n` +
+        `/credits <id> <amount> - Give coins`
+    );
 });
 
-// Toggle Online: /online Sophia
+// 1. Toggle Online (Takeover)
 bot.onText(/\/online (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    const name = match[1]; // e.g., "Sophia"
+    const name = match[1];
+    await db.run('INSERT OR IGNORE INTO agents (name) VALUES (?)', name);
     await db.run('UPDATE agents SET is_online = 1 WHERE name = ?', name);
-    bot.sendMessage(ADMIN_ID, `✅ **${name} is now ONLINE.**\nMessages will be forwarded to you.`);
+    bot.sendMessage(ADMIN_ID, `🟢 **${name} is ONLINE.**\nYou will now receive her messages.`);
 });
 
-// Toggle Offline: /offline Sophia
+// 2. Toggle Offline (AI Mode)
 bot.onText(/\/offline (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
     const name = match[1];
     await db.run('UPDATE agents SET is_online = 0 WHERE name = ?', name);
-    bot.sendMessage(ADMIN_ID, `💤 **${name} is now OFFLINE.**\nAI will handle replies.`);
+    bot.sendMessage(ADMIN_ID, `🔴 **${name} is OFFLINE.**\nAI will handle replies.`);
 });
 
-// Add Credits: /add 12345 100
-bot.onText(/\/add (.+) (.+)/, async (msg, match) => {
+// 3. Change Agent Image
+bot.onText(/\/setimage (.+?) (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    const name = match[1];
+    const url = match[2];
+    await db.run('UPDATE agents SET image_url = ? WHERE name = ?', [url, name]);
+    bot.sendMessage(ADMIN_ID, `🖼️ Image updated for ${name}.`);
+});
+
+// 4. Give Credits
+bot.onText(/\/credits (.+) (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
     const userId = match[1];
     const amount = match[2];
     await db.run('UPDATE users SET credits = credits + ? WHERE user_id = ?', [amount, userId]);
-    bot.sendMessage(ADMIN_ID, `Added ${amount} coins to ${userId}`);
+    bot.sendMessage(ADMIN_ID, `💰 Added ${amount} credits to User ${userId}`);
 });
+
+// =========================================================
+// 5. AI LOGIC (Simple Fallback)
+// =========================================================
+async function getAiReply(text, agentName) {
+    // You can replace this with an OpenAI API call later
+    const responses = [
+        "That's so interesting... tell me more? 😘",
+        "I was just thinking about you.",
+        "I wish you were here right now.",
+        "You always know what to say to make me smile.",
+        "Send me a picture? I want to see you. 😉"
+    ];
+    return responses[Math.floor(Math.random() * responses.length)];
+                    }
