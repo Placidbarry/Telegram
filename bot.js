@@ -12,7 +12,7 @@ const { open } = require('sqlite');
 // 🔴 CONFIGURATION
 // =========================================================
 // Replace these with your actual details
-const BOT_TOKEN = process.env.BOT_TOKEN || 'YOUR_BOT_TOKEN_HERE';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8577711169:AAEkQwcKZfi-G3MRv2s5-_z3GXnHJwtC-Qg';
 const ADMIN_ID = parseInt(process.env.ADMIN_ID) || 7640605912; // Your ID from the upload
 const WEBAPP_URL = process.env.WEBAPP_URL || 'https://placidbarry.github.io/sync-hearts-app/';
 
