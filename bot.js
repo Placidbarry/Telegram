@@ -198,7 +198,8 @@ bot.on('message', async (msg) => {
 
         bot.sendChatAction(userId, 'typing');
         setTimeout(async () => {
-            const reply = await getAiReply(msg.text, user.current_agent_name);
+            // Pass chatId so we can show 'typing' status
+            const reply = await getAiReply(userId, msg.text, user.current_agent_name);
             bot.sendMessage(userId, reply);
         }, 1500); // 1.5s delay for realism
     }
@@ -280,16 +281,62 @@ bot.onText(/\/credits (.+) (.+)/, async (msg, match) => {
 });
 
 // =========================================================
-// 5. AI LOGIC (Simple Fallback)
+// 5. AI LOGIC (Typing Simulation & Seductive Fallback)
 // =========================================================
-async function getAiReply(text, agentName) {
-    // You can replace this with an OpenAI API call later
-    const responses = [
-        "That's so interesting... tell me more? 😘",
-        "I was just thinking about you.",
-        "I wish you were here right now.",
-        "You always know what to say to make me smile.",
-        "Send me a picture? I want to see you. 😉"
+async function getAiReply(chatId, text, agentName) {
+    // 1. SIMULATE TYPING (The "Presence" Illusion)
+    // Random delay between 2 to 5 seconds to feel human
+    const delay = Math.floor(Math.random() * 3000) + 2000; 
+    
+    await bot.sendChatAction(chatId, 'typing');
+    await new Promise(resolve => setTimeout(resolve, delay));
+
+    // 2. SAFETY & SEDUCTION PROMPT (No graphic content)
+    // In production, send 'text' to OpenAI/LLM here.
+    // For now, we use a sophisticated static list that drives engagement.
+    
+    const flirtyResponses = [
+        `Mmm... you always know how to get my attention, don't you? 😏`,
+        `I was just looking at your profile photo... tell me something real about you.`,
+        `You're making me blush over here. 🙈 What else?`,
+        `I love it when you talk to me like that.`,
+        `I’d tell you what I’m thinking, but you might have to unlock a photo to see... 📸`,
+        `You’re trouble, aren't you? I like trouble. 💋`,
+        `Stop teasing me... or actually, don't stop.`,
+        `I wish you were here to whisper that in my ear.`
     ];
-    return responses[Math.floor(Math.random() * responses.length)];
-                    }
+
+    return flirtyResponses[Math.floor(Math.random() * flirtyResponses.length)];
+}
+
+// =========================================================
+// 6. TELEGRAM STARS MONETIZATION (Native Payments)
+// =========================================================
+
+// A. Handle Pre-Checkout (Required for Stars)
+bot.on('pre_checkout_query', (query) => {
+    bot.answerPreCheckoutQuery(query.id, true);
+});
+
+// B. Handle Successful Payment (Unlock Media)
+bot.on('message', async (msg) => {
+    if (msg.successful_payment) {
+        const chatId = msg.chat.id;
+        const payload = msg.successful_payment.invoice_payload; // e.g., "unlock_pic_Sophia"
+        
+        // 1. Acknowledge
+        await bot.sendMessage(chatId, "💎 **Payment Received!** Unlocking your private content...");
+
+        // 2. Deliver Content based on Payload
+        if (payload.includes('pic')) {
+            // REPLACE THIS URL with your actual premium content URL or File ID
+            const premiumPhoto = 'https://images.unsplash.com/photo-1534528741775-53994a69daeb'; 
+            await bot.sendPhoto(chatId, premiumPhoto, { caption: "Here it is... just for you. 💋" });
+        } 
+        else if (payload.includes('video')) {
+            // REPLACE THIS URL with your actual premium video
+            const premiumVideo = 'https://www.w3schools.com/html/mov_bbb.mp4'; 
+            await bot.sendVideo(chatId, premiumVideo, { caption: "Promise you won't show anyone? 🤫" });
+        }
+    }
+});
