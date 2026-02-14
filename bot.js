@@ -19,7 +19,7 @@ const PORT = process.env.PORT || 8080;
 app.get('/', (_, res) => res.send('Sync Hearts Agency Bot is Running.'));
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
-const BOT_TOKEN = '8577711169:AAE8Av0ADtel8-4IbreUJe_08g-DenIhHXw';
+const BOT_TOKEN = '8577711169:AAGnhnGoZ3U3-hIIj7zGkSXfk1uYWSODnwY';
 const WEBAPP_URL = 'https://placidbarry.github.io/sync-hearts-app/';
 const ADMIN_ID = 7640605912;
 
