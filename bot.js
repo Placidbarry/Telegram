@@ -29,7 +29,7 @@ if (!fs.existsSync(UPLOAD_DIR)) {
 app.use('/uploads', express.static(UPLOAD_DIR));
 
 // YOUR CREDENTIALS (Preserved from your upload)
-const BOT_TOKEN = '8577711169:AAE8Av0ADtel8-4IbreUJe_08g-DenIhHXw';
+const BOT_TOKEN = '8577711169:AAExdUa5Yzp4113lIwi9IXHQnAB6O3LOHak';
 const WEBAPP_URL = 'https://placidbarry.github.io/sync-hearts-app/'; 
 const ADMIN_ID = 7640605912; 
 // Change this to your live URL when deploying (e.g. https://myapp.onrender.com)
