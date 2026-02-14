@@ -86,23 +86,64 @@ bot.onText(/\/start/, async (msg) => {
     });
 });
 
-// Handle WebApp Data (When user clicks in the App)
+// =========================================================
+// HANDLE WEBAPP DATA (Fixes Buttons & Navigation)
+// =========================================================
 bot.on('message', async (msg) => {
     if (msg.web_app_data) {
         const chatId = msg.chat.id;
         try {
             const data = JSON.parse(msg.web_app_data.data);
 
-            // Logic for when user selects an agent or action
-            // Assuming your frontend sends { action: 'select_agent', agent_name: 'Sophia' }
-            // or { action: 'interaction', agent_name: 'Sophia', cost: 10 }
-            
-            const agentName = data.agent_name || 'Sophia'; // Default to Sophia if missing
-            
-            // Update User's Active Agent
-            await db.run('UPDATE users SET current_agent_name = ? WHERE user_id = ?', [agentName, chatId]);
+            // 1. HANDLE REGISTRATION
+            if (data.action === 'register_new_user') {
+                const { firstName, age, lookingFor } = data.user_data;
+                await db.run(`INSERT OR REPLACE INTO users (user_id, first_name, credits) VALUES (?, ?, ?)`, 
+                    [chatId, firstName, 50]); // Give 50 credits
+                
+                return bot.sendMessage(chatId, `✅ **Registration Complete!**\n\nWelcome ${firstName}.\nYou have received 50 Free Credits.\n\nType /start to pick a companion.`);
+            }
 
-            bot.sendMessage(chatId, `💬 **You are now connected with ${agentName}.**\n\nShe is waiting for your message. Type below! 👇`);
+            // 2. HANDLE "CHATS" BUTTON (Navigation)
+            if (data.action === 'open_chats') {
+                // Check who they are talking to
+                const user = await db.get('SELECT current_agent_name FROM users WHERE user_id = ?', chatId);
+                const current = user ? user.current_agent_name : "No one yet";
+                
+                return bot.sendMessage(chatId, `📂 **My Chats**\n\nCurrently Active: **${current}**\n\nType a message to continue chatting!`);
+            }
+
+            // 3. HANDLE "BUY" / WALLET BUTTON
+            if (data.action === 'open_wallet') {
+                 // You can integrate Telegram Stars here later
+                return bot.sendMessage(chatId, `💳 **Wallet & Credits**\n\nBalance: Check app top-right.\nTo top up, please contact support (Demo).`);
+            }
+
+            // 4. HANDLE INTERACTION (Text, Gift, Video)
+            if (data.action === 'interaction') {
+                const { sub_type, agent_name, cost } = data;
+                
+                // Deduct credits (Double check backend side for security in production)
+                await db.run('UPDATE users SET credits = credits - ? WHERE user_id = ?', [cost, chatId]);
+                await db.run('UPDATE users SET current_agent_name = ? WHERE user_id = ?', [agent_name, chatId]);
+
+                let replyText = "";
+                switch(sub_type) {
+                    case 'text': replyText = `💬 **Chat started with ${agent_name}.**\nShe is online. Say hello!`; break;
+                    case 'flower': replyText = `🌹 **You sent flowers to ${agent_name}!**\nShe loves them.`; break;
+                    case 'naughty': replyText = `😈 **Ooh... ${agent_name} received your gift.**\nShe is blushing.`; break;
+                    case 'pic': replyText = `📸 **${agent_name} is taking a photo...**\n(Admin: Send a photo now)`; break;
+                    case 'video': replyText = `🎥 **${agent_name} is recording a video...**\n(Admin: Send a video now)`; break;
+                }
+                
+                return bot.sendMessage(chatId, replyText);
+            }
+
+            // 5. DEFAULT: SELECT AGENT (Fallthrough)
+            // If the app sent just an agent selection without a specific action type
+            const agentName = data.agent_name || data.name || 'Sophia'; 
+            await db.run('UPDATE users SET current_agent_name = ? WHERE user_id = ?', [agentName, chatId]);
+            bot.sendMessage(chatId, `💋 **Connected with ${agentName}.**\n\nType your message below 👇`);
             
         } catch (e) {
             console.error("Error parsing WebApp data", e);
