@@ -8,18 +8,29 @@ const TelegramBot = require('node-telegram-bot-api');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
 const express = require('express');
-const cors = require('cors'); // NEW: Allows WebApp to get data
+const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 const axios = require('axios'); 
-const multer = require('multer'); // NEW: File Handler
+const multer = require('multer');
 
-// ... 
+// =========================================================
+// 1. SERVER CONFIGURATION
+// =========================================================
 const app = express();
 app.use(cors());
 app.use(express.json()); 
 
-// SETUP UPLOADS FOR CLIENTS
+const PORT = process.env.PORT || 8080;
+const UPLOAD_DIR = path.join(__dirname, 'public/uploads');
+
+// Ensure upload directory exists
+if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+app.use('/uploads', express.static(UPLOAD_DIR));
+
+// Configure Multer for Client Uploads
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, UPLOAD_DIR),
     filename: (req, file, cb) => cb(null, 'client-' + Date.now() + '.jpg')
@@ -32,74 +43,35 @@ app.post('/api/upload_client', upload.single('photo'), (req, res) => {
     else res.status(400).send("Error");
 });
 
-const PORT = process.env.PORT || 8080;
-
-// NEW: Setup Image Hosting Folder
-const UPLOAD_DIR = path.join(__dirname, 'public/uploads');
-if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-app.use('/uploads', express.static(UPLOAD_DIR));
-
-// SECURE CONFIGURATION (Reads from Render Environment)
+// Environment Variables
 const BOT_TOKEN = process.env.BOT_TOKEN; 
 const WEBAPP_URL = process.env.WEBAPP_URL; 
 const ADMIN_ID = Number(process.env.ADMIN_ID); 
-
-// SERVER URL: Finds your Render link automatically, or defaults to localhost
 const SERVER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
-// Safety Check
 if (!BOT_TOKEN || !WEBAPP_URL) {
     console.error("❌ CRITICAL ERROR: Missing BOT_TOKEN or WEBAPP_URL in Environment Variables.");
     process.exit(1);
 }
 
+// Start Server
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
 
-// --- WEBHOOK CONFIGURATION (Fixes 409 Conflict) ---
-const bot = new TelegramBot(BOT_TOKEN); // No polling: true
-
-// 1. Tell Telegram where to send messages
+// =========================================================
+// 2. TELEGRAM & WEBHOOK SETUP
+// =========================================================
+const bot = new TelegramBot(BOT_TOKEN); 
 const webhookUrl = `${SERVER_URL}/bot${BOT_TOKEN}`;
 bot.setWebHook(webhookUrl);
 console.log(`🔗 Webhook set to: ${webhookUrl}`);
 
-// 2. Create a route to receive updates
 app.post(`/bot${BOT_TOKEN}`, (req, res) => {
     bot.processUpdate(req.body);
     res.sendStatus(200);
 });
-// --------------------------------------------------
-// NEW API: The Web App will call this to get the agent list
-app.get('/api/agents', async (req, res) => {
-    try {
-        if (!db) return res.status(500).json({ error: "DB not ready" });
-        const agents = await db.all('SELECT * FROM agents');
-        
-        // Format data for the Web App
-        const formatted = agents.map(a => ({
-            id: a.id,
-            name: a.name,
-            age: a.age || 23,
-            location: a.location || 'Unknown',
-            verified: true,
-            premium: true,
-            // Main photo (Photo 1)
-            photo: a.photo1 ? `${SERVER_URL}/uploads/${a.photo1}` : 'https://placehold.co/400x500',
-            // Gallery for potential future use
-            gallery: [a.photo1, a.photo2, a.photo3].filter(p => p).map(p => `${SERVER_URL}/uploads/${p}`),
-            stats: { rating: '5.0', chats: `${100 * a.id}k` }
-        }));
-        res.json(formatted);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
 
 // =========================================================
-// 2. DATABASE SETUP (UPGRADED)
+// 3. DATABASE SETUP
 // =========================================================
 let db;
 
@@ -118,7 +90,6 @@ let db;
         );
     `);
 
-    // NEW SCHEMA: Stores 3 photos instead of 1 image_url
     await db.exec(`
         CREATE TABLE IF NOT EXISTS agents (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -147,106 +118,31 @@ let db;
     console.log('✅ Database Ready.');
 })();
 
-// =========================================================
-// 3.5. USER WELCOME FLOW (Fixed: Missing /start)
-// =========================================================
-
-bot.onText(/\/start/, async (msg) => {
-    const userId = msg.from.id;
-    const firstName = msg.from.first_name || 'User';
-    const username = msg.from.username || '';
-
+// API: Get Agents for Web App
+app.get('/api/agents', async (req, res) => {
     try {
-        // 1. Save User to Database (Ignore if already exists)
-        await db.run(
-            `INSERT INTO users (user_id, first_name, username, credits) VALUES (?, ?, ?, 0)
-             ON CONFLICT(user_id) DO UPDATE SET first_name = ?`,
-            [userId, firstName, username, firstName]
-        );
-
-        // 2. Send Welcome Message with App Link
-        bot.sendMessage(userId, 
-            `🔥 **Welcome, ${firstName}.**\n\nTap below to enter the agency and browse models.`, 
-            {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [[{ text: "💋 Enter Agency", web_app: { url: WEBAPP_URL } }]]
-                }
-            }
-        );
+        if (!db) return res.status(500).json({ error: "DB not ready" });
+        const agents = await db.all('SELECT * FROM agents');
+        
+        const formatted = agents.map(a => ({
+            id: a.id,
+            name: a.name,
+            age: a.age || 23,
+            location: a.location || 'Unknown',
+            verified: true,
+            premium: true,
+            photo: a.photo1 ? `${SERVER_URL}/uploads/${a.photo1}` : 'https://placehold.co/400x500',
+            gallery: [a.photo1, a.photo2, a.photo3].filter(p => p).map(p => `${SERVER_URL}/uploads/${p}`),
+            stats: { rating: '5.0', chats: `${100 * a.id}k` }
+        }));
+        res.json(formatted);
     } catch (e) {
-        console.error("Start Error:", e);
+        res.status(500).json({ error: e.message });
     }
-});
-
-// State Machine: Tracks if Admin is currently uploading a photo
-const adminState = {}; 
-
-// --- CREATE AGENT ---
-bot.onText(/\/create/, async (msg) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    adminState[ADMIN_ID] = { step: 'CREATE_NAME', data: {} };
-    bot.sendMessage(ADMIN_ID, "🆕 **Create New Model**\n\nPlease enter the **Name**:");
-});
-
-// --- EDIT AGENT ---
-bot.onText(/\/edit (.+)/, async (msg, match) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    const name = match[1];
-
-    const agent = await db.get('SELECT * FROM agents WHERE name = ?', name);
-    if (!agent) return bot.sendMessage(ADMIN_ID, `❌ Agent "${name}" not found.`);
-
-    // Start with AGE
-    adminState[ADMIN_ID] = { step: 'EDIT_AGE', agent_id: agent.id };
-    bot.sendMessage(ADMIN_ID, `✏️ **Editing ${name}**\n\nFirst, enter the **Age** (e.g. 24):`);
-});
-
-// ... inside handleAdminFlow function ...
-
-async function handleAdminFlow(msg) {
-    const state = adminState[ADMIN_ID];
-
-    // NEW STEP: Handle Age
-    if (state.step === 'EDIT_AGE') {
-        const age = parseInt(msg.text);
-        if(!isNaN(age)) {
-            await db.run('UPDATE agents SET age = ? WHERE id = ?', [age, state.agent_id]);
-            // Now move to photos
-            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: state.agent_id };
-            bot.sendMessage(ADMIN_ID, "✅ Age Updated.\n\nNow upload **Photo #1** (or type 'skip').");
-        } else {
-            bot.sendMessage(ADMIN_ID, "⚠️ Please enter a number for Age.");
-        }
-        return;
-    }
-    
-
-// --- DELETE AGENT (NEW) ---
-bot.onText(/\/delete (.+)/, async (msg, match) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    const name = match[1];
-
-    const agent = await db.get('SELECT * FROM agents WHERE name = ?', name);
-    if (!agent) return bot.sendMessage(ADMIN_ID, `❌ Agent "${name}" not found.`);
-
-    await db.run('DELETE FROM agents WHERE name = ?', name);
-    bot.sendMessage(ADMIN_ID, `🗑️ **Deleted:** Agent "${name}" has been removed.`);
-});
-
-// --- LIST AGENTS ---
-bot.onText(/\/list/, async (msg) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    const agents = await db.all('SELECT * FROM agents');
-    if(agents.length === 0) return bot.sendMessage(ADMIN_ID, "No agents found. Use /create");
-    
-    let text = "📋 **Current Models:**\n";
-    agents.forEach(a => text += `- ${a.name} (Online: ${a.is_online ? '✅' : '🔴'})\n`);
-    bot.sendMessage(ADMIN_ID, text);
 });
 
 // =========================================================
-// 4. MAIN LOGIC ROUTER
+// 4. MAIN LOGIC ROUTER (The Fix for Conflicting Handlers)
 // =========================================================
 
 bot.on('message', async (msg) => {
@@ -262,24 +158,96 @@ bot.on('message', async (msg) => {
         return handleWebAppData(msg);
     }
 
-    // C. Regular Chat
-    if (msg.text && msg.text.startsWith('/')) return; // Ignore commands
+    // C. Regular Chat & Commands
+    if (msg.text && msg.text.startsWith('/')) return; // Ignore commands (handled by onText)
     await handleRegularChat(msg);
 });
 
+// =========================================================
+// 5. ADMIN COMMANDS & FLOW
+// =========================================================
+const adminState = {}; 
+
+// /create
+bot.onText(/\/create/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    adminState[ADMIN_ID] = { step: 'CREATE_NAME', data: {} };
+    bot.sendMessage(ADMIN_ID, "🆕 **Create New Model**\n\nPlease enter the **Name**:");
+});
+
+// /edit [name]
+bot.onText(/\/edit (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    const name = match[1];
+
+    const agent = await db.get('SELECT * FROM agents WHERE name = ?', name);
+    if (!agent) return bot.sendMessage(ADMIN_ID, `❌ Agent "${name}" not found.`);
+
+    // Start editing from Age
+    adminState[ADMIN_ID] = { step: 'EDIT_AGE', agent_id: agent.id };
+    bot.sendMessage(ADMIN_ID, `✏️ **Editing ${name}**\n\nFirst, enter the **Age** (e.g. 24):`);
+});
+
+// /delete [name]
+bot.onText(/\/delete (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    const name = match[1];
+    await db.run('DELETE FROM agents WHERE name = ?', name);
+    bot.sendMessage(ADMIN_ID, `🗑️ **Deleted:** Agent "${name}" has been removed.`);
+});
+
+// /list
+bot.onText(/\/list/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    const agents = await db.all('SELECT * FROM agents');
+    if(agents.length === 0) return bot.sendMessage(ADMIN_ID, "No agents found. Use /create");
+    
+    let text = "📋 **Current Models:**\n";
+    agents.forEach(a => text += `- ${a.name} (Online: ${a.is_online ? '✅' : '🔴'})\n`);
+    bot.sendMessage(ADMIN_ID, text);
+});
+
+// /online & /offline
+bot.onText(/\/online (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    await db.run('UPDATE agents SET is_online = 1 WHERE name = ?', match[1]);
+    bot.sendMessage(ADMIN_ID, `🟢 ${match[1]} is ONLINE.`);
+});
+
+bot.onText(/\/offline (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    await db.run('UPDATE agents SET is_online = 0 WHERE name = ?', match[1]);
+    bot.sendMessage(ADMIN_ID, `🔴 ${match[1]} is OFFLINE.`);
+});
+
+// /wipe_all_data
+bot.onText(/\/wipe_all_data/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    bot.sendMessage(msg.chat.id, "⚠️ **WARNING** ⚠️\nType `/confirm_wipe` to delete ALL data.");
+});
+
+bot.onText(/\/confirm_wipe/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    await db.run('DELETE FROM users');
+    await db.run('DELETE FROM agents');
+    await db.run('DELETE FROM rooms');
+    bot.sendMessage(msg.chat.id, "✅ **Database Wiped Successfully.**");
+});
+
 // ---------------------------------------------------------
-// LOGIC A: Admin Flow (Uploading Photos)
+// LOGIC A: Admin Flow Handler (Merged & Fixed)
 // ---------------------------------------------------------
 async function handleAdminFlow(msg) {
     const state = adminState[ADMIN_ID];
 
-    // Step 1: Set Name
+    // Step 1: Create Name
     if (state.step === 'CREATE_NAME') {
         const name = msg.text;
         try {
             const result = await db.run('INSERT INTO agents (name) VALUES (?)', name);
-            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: result.lastID };
-            bot.sendMessage(ADMIN_ID, `✅ Created **${name}**.\n\nNow upload **Photo #1** (Main).`);
+            // Move to Age immediately after name
+            adminState[ADMIN_ID] = { step: 'EDIT_AGE', agent_id: result.lastID };
+            bot.sendMessage(ADMIN_ID, `✅ Created **${name}**.\n\nNow enter the **Age** (e.g. 23).`);
         } catch (e) {
             bot.sendMessage(ADMIN_ID, `❌ Error: Name "${name}" already exists.`);
             delete adminState[ADMIN_ID];
@@ -287,7 +255,21 @@ async function handleAdminFlow(msg) {
         return;
     }
 
-    // Step 2, 3, 4: Handle Photos
+    // Step 2: Edit Age
+    if (state.step === 'EDIT_AGE') {
+        const age = parseInt(msg.text);
+        if(!isNaN(age)) {
+            await db.run('UPDATE agents SET age = ? WHERE id = ?', [age, state.agent_id]);
+            // Now move to photos
+            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: state.agent_id };
+            bot.sendMessage(ADMIN_ID, "✅ Age Updated.\n\nNow upload **Photo #1** (Main) or type 'skip'.");
+        } else {
+            bot.sendMessage(ADMIN_ID, "⚠️ Please enter a number for Age.");
+        }
+        return;
+    }
+
+    // Step 3, 4, 5: Handle Photos
     if (state.step.startsWith('EDIT_photos_')) {
         const photoIndex = state.step.split('_')[2]; // "1", "2", or "3"
         const colName = `photo${photoIndex}`;
@@ -347,53 +329,88 @@ async function downloadTelegramFile(fileId, fileName) {
     }
 }
 
-// ---------------------------------------------------------
-// LOGIC B: WebApp Data
-// ---------------------------------------------------------
+// =========================================================
+// 6. USER LOGIC
+// =========================================================
+
+// /start
+bot.onText(/\/start/, async (msg) => {
+    const userId = msg.from.id;
+    const firstName = msg.from.first_name || 'User';
+
+    try {
+        await db.run(
+            `INSERT INTO users (user_id, first_name, credits) VALUES (?, ?, 0)
+             ON CONFLICT(user_id) DO UPDATE SET first_name = ?`,
+            [userId, firstName, firstName]
+        );
+
+        bot.sendMessage(userId, 
+            `🔥 **Welcome, ${firstName}.**\n\nTap below to enter the agency and browse models.`, 
+            {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[{ text: "💋 Enter Agency", web_app: { url: WEBAPP_URL } }]]
+                }
+            }
+        );
+    } catch (e) {
+        console.error("Start Error:", e);
+    }
+});
+
+// Logic B: WebApp Data
 async function handleWebAppData(msg) {
     const userId = msg.chat.id;
-    const data = JSON.parse(msg.web_app_data.data);
+    
+    try {
+        const data = JSON.parse(msg.web_app_data.data);
 
-    if (data.action === 'register_new_user') {
-        // Create user if missing, OR update credits if they exist
-        await db.run(`
-            INSERT INTO users (user_id, first_name, credits) VALUES (?, 'New User', 50)
-            ON CONFLICT(user_id) DO UPDATE SET credits = 50
-        `, [userId]);
-        
-        return bot.sendMessage(userId, `✅ **Registration Complete!**\n\n💰 50 Free Credits added.`);
-    }
+        // 1. REGISTRATION
+        if (data.action === 'register_new_user') {
+            const { age, country, photo_url } = data.user_data;
+            
+            await db.run(`
+                INSERT INTO users (user_id, first_name, credits, profile_photo) 
+                VALUES (?, ?, 50, ?)
+                ON CONFLICT(user_id) DO UPDATE SET 
+                credits = 50, profile_photo = ?
+            `, [userId, msg.from.first_name, photo_url || null, photo_url || null]);
 
-    // Agent Selection (Using ID from API data)
-    const agentId = data.agent_id; 
-    if (agentId) {
-        const agent = await db.get('SELECT * FROM agents WHERE id = ?', agentId);
-        if (!agent) return;
-
-        let room = await db.get('SELECT id FROM rooms WHERE user_id = ? AND agent_id = ?', [userId, agent.id]);
-        if (!room) {
-            const res = await db.run('INSERT INTO rooms (user_id, agent_id) VALUES (?, ?)', [userId, agent.id]);
-            room = { id: res.lastID };
+            if(photo_url) {
+                bot.sendMessage(ADMIN_ID, `🆕 **New Client:** ${msg.from.first_name} (${age}, ${country})\nPhoto: ${photo_url}`);
+            }
+            return bot.sendMessage(userId, `✅ **Registration Complete!**\n\n💰 50 Free Credits added.`);
         }
-        await db.run('UPDATE users SET active_room_id = ? WHERE user_id = ?', [room.id, userId]);
 
-        const userVal = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
-        if (userVal.credits > 0) {
+        // 2. AGENT SELECTION
+        if (data.action === 'select_agent') {
+            const agentId = data.agent_id; 
+            const agent = await db.get('SELECT * FROM agents WHERE id = ?', agentId);
+            if (!agent) return;
+
+            let room = await db.get('SELECT id FROM rooms WHERE user_id = ? AND agent_id = ?', [userId, agent.id]);
+            if (!room) {
+                const res = await db.run('INSERT INTO rooms (user_id, agent_id) VALUES (?, ?)', [userId, agent.id]);
+                room = { id: res.lastID };
+            }
+            await db.run('UPDATE users SET active_room_id = ? WHERE user_id = ?', [room.id, userId]);
+
+            const userVal = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
+            
             bot.sendMessage(userId, `💬 **Connected with ${agent.name}.**`, { 
                 reply_markup: {
                     keyboard: [['📸 Pic (15)', '🎥 Video (50)'], ['🎁 Gift (5)', '💳 Balance'], ['❌ Leave Chat']],
                     resize_keyboard: true
                 }
             });
-        } else {
-            bot.sendMessage(userId, `🔒 **Locked.** Please top up.`);
         }
+    } catch (e) {
+        console.error("WebApp Error:", e);
     }
 }
 
-// ---------------------------------------------------------
-// LOGIC C: Regular Chat (Human vs AI)
-// ---------------------------------------------------------
+// Logic C: Regular Chat
 async function handleRegularChat(msg) {
     const userId = msg.chat.id;
 
@@ -430,10 +447,7 @@ async function handleRegularChat(msg) {
         if (user.credits < 15) return bot.sendMessage(userId, "❌ Low balance.");
         await db.run('UPDATE users SET credits = credits - 15 WHERE user_id = ?', userId);
         
-        // NEW: SENDS THE UPLOADED PHOTO FROM DB
-        // The bot reads photo1 from DB, converts to URL, and Telegram fetches it.
         const photoUrl = `${SERVER_URL}/uploads/${user.photo1}`;
-        
         bot.sendMessage(userId, "😘 *Sending private pic...*", { parse_mode: 'Markdown' });
         setTimeout(() => bot.sendPhoto(userId, photoUrl), 1000); 
         return;
@@ -453,241 +467,3 @@ async function handleRegularChat(msg) {
         setTimeout(() => bot.sendMessage(userId, "I'm listening... tell me more."), 2000);
     }
 }
-
-// Toggle Online/Offline
-bot.onText(/\/online (.+)/, async (msg, match) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    await db.run('UPDATE agents SET is_online = 1 WHERE name = ?', match[1]);
-    bot.sendMessage(ADMIN_ID, `🟢 ${match[1]} is ONLINE.`);
-});
-
-bot.onText(/\/offline (.+)/, async (msg, match) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    await db.run('UPDATE agents SET is_online = 0 WHERE name = ?', match[1]);
-    bot.sendMessage(ADMIN_ID, `🔴 ${match[1]} is OFFLINE.`);
-}); 
-// =========================================================
-// 7. DANGER ZONE: WIPE DATABASE COMMAND
-// =========================================================
-
-bot.onText(/\/wipe_all_data/, async (msg) => {
-    // Security Check: Only ADMIN can do this
-    if (msg.chat.id !== ADMIN_ID) return;
-
-    // Double Check Confirmation
-    bot.sendMessage(msg.chat.id, "⚠️ **WARNING** ⚠️\n\nThis will delete:\n- All Users & Credits\n- All Created Agents\n- All Chat Rooms\n\nType `/confirm_wipe` to proceed.");
-});
-
-bot.onText(/\/confirm_wipe/, async (msg) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-
-    try {
-        // Delete all rows from tables
-        await db.run('DELETE FROM users');
-        await db.run('DELETE FROM agents');
-        await db.run('DELETE FROM rooms');
-        
-        // Optional: Reset the Auto-Increment counters (start IDs from 1 again)
-        await db.run('DELETE FROM sqlite_sequence WHERE name="users"');
-        await db.run('DELETE FROM sqlite_sequence WHERE name="agents"');
-        await db.run('DELETE FROM sqlite_sequence WHERE name="rooms"');
-
-        bot.sendMessage(msg.chat.id, "✅ **Database Wiped Successfully.**\n\nSystem is fresh. You can now `/create` new models.");
-        console.log("Database wiped by Admin.");
-    } catch (error) {
-        bot.sendMessage(msg.chat.id, `❌ Error wiping DB: ${error.message}`);
-    }
-});
-
-// NEW COMMAND: Only wipes Clients (Users/Rooms), Keeps Agents (Models) safe.
-bot.onText(/\/reset_clients/, async (msg) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    
-    try {
-        await db.run('DELETE FROM users');
-        await db.run('DELETE FROM rooms');
-        // Don't delete agents!
-        bot.sendMessage(ADMIN_ID, "✅ **Clients Wiped.**\nAll user accounts and chats deleted.\nModels are SAFE.");
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-    }
-});
-
-// --- COMMAND: Create Agent ---
-bot.onText(/\/create/, async (msg) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    adminState[ADMIN_ID] = { step: 'CREATE_NAME', data: {} };
-    bot.sendMessage(ADMIN_ID, "🆕 **New Model Name:**");
-});
-
-// --- COMMAND: Delete Agent ---
-bot.onText(/\/delete (.+)/, async (msg, match) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    await db.run('DELETE FROM agents WHERE name = ?', match[1]);
-    bot.sendMessage(ADMIN_ID, `🗑️ Deleted ${match[1]}.`);
-});
-
-// --- ADMIN STATE HANDLER (Photos) ---
-bot.on('message', async (msg) => {
-    if (msg.chat.id !== ADMIN_ID || !adminState[ADMIN_ID]) return;
-    const state = adminState[ADMIN_ID];
-
-    // 1. Create Name
-    if (state.step === 'CREATE_NAME') {
-        try {
-            const res = await db.run('INSERT INTO agents (name) VALUES (?)', msg.text);
-            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: res.lastID };
-            bot.sendMessage(ADMIN_ID, `✅ Created **${msg.text}**. Upload Photo #1.`);
-        } catch (e) { bot.sendMessage(ADMIN_ID, "❌ Name taken."); }
-        return;
-    }
-
-    // 2. Handle Age Edit
-    if (state.step === 'EDIT_AGE') {
-        const age = parseInt(msg.text);
-        if(!isNaN(age)) {
-            await db.run('UPDATE agents SET age = ? WHERE id = ?', [age, state.agent_id]);
-            // Now move to photos
-            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: state.agent_id };
-            bot.sendMessage(ADMIN_ID, "✅ Age Updated.\n\nNow upload **Photo #1** (or type 'skip').");
-        } else {
-            bot.sendMessage(ADMIN_ID, "⚠️ Please enter a number for Age.");
-        }
-        return;
-    }
-
-    // 3. Handle Photos
-    if (state.step.startsWith('EDIT_photos_')) {
-        const idx = state.step.split('_')[2];
-        const col = `photo${idx}`;
-        
-        if (msg.text && msg.text.toLowerCase() === 'skip') {
-            return advancePhoto(state.agent_id, parseInt(idx));
-        }
-
-        if (msg.photo) {
-            const fileId = msg.photo[msg.photo.length - 1].file_id;
-            const fileName = `agent_${state.agent_id}_p${idx}_${Date.now()}.jpg`;
-            
-            try {
-                const fileLink = await bot.getFileLink(fileId);
-                const writer = fs.createWriteStream(path.join(UPLOAD_DIR, fileName));
-                const response = await axios({ url: fileLink, responseType: 'stream' });
-                response.data.pipe(writer);
-                
-                writer.on('finish', async () => {
-                    await db.run(`UPDATE agents SET ${col} = ? WHERE id = ?`, [fileName, state.agent_id]);
-                    bot.sendMessage(ADMIN_ID, `✅ Photo ${idx} saved.`);
-                    advancePhoto(state.agent_id, parseInt(idx));
-                });
-            } catch (e) {
-                bot.sendMessage(ADMIN_ID, "❌ Error saving photo.");
-            }
-        }
-    }
-});
-
-function advancePhoto(id, current) {
-    if (current < 3) {
-        adminState[ADMIN_ID] = { step: `EDIT_photos_${current + 1}`, agent_id: id };
-        bot.sendMessage(ADMIN_ID, `Upload **Photo #${current + 1}** (or 'skip').`);
-    } else {
-        delete adminState[ADMIN_ID];
-        bot.sendMessage(ADMIN_ID, "🎉 **Done!**");
-    }
-}
-
-// =========================================================
-// 5. USER HANDLERS (Start, Register, Chat)
-// =========================================================
-
-bot.onText(/\/start/, async (msg) => {
-    const userId = msg.from.id;
-    // Fix: Using INSERT OR IGNORE logic
-    await db.run(`INSERT INTO users (user_id, first_name, credits) VALUES (?, ?, 0) ON CONFLICT(user_id) DO NOTHING`, [userId, msg.from.first_name]);
-    
-    bot.sendMessage(userId, `🔥 **Welcome, ${msg.from.first_name}.**`, {
-        parse_mode: 'Markdown',
-        reply_markup: { inline_keyboard: [[{ text: "💋 Enter Agency", web_app: { url: WEBAPP_URL } }]] }
-    });
-});
-
-bot.on('message', async (msg) => {
-    // A. WebApp Data Handler
-    if (msg.web_app_data) {
-        const userId = msg.chat.id;
-        try {
-            const data = JSON.parse(msg.web_app_data.data);
-
-            // REGISTRATION (With Profile Photo Support)
-            if (data.action === 'register_new_user') {
-                const { age, country, photo_url } = data.user_data;
-                // Update user with details and photo
-                await db.run(`
-                    INSERT INTO users (user_id, first_name, credits, profile_photo) 
-                    VALUES (?, ?, 50, ?)
-                    ON CONFLICT(user_id) DO UPDATE SET 
-                    credits = 50, profile_photo = ?
-                `, [userId, msg.from.first_name, photo_url || null, photo_url || null]);
-                
-                // Forward New Profile to Admin
-                if(photo_url) {
-                    bot.sendMessage(ADMIN_ID, `🆕 **New Client:** ${msg.from.first_name} (${age}, ${country})\nPhoto: ${photo_url}`);
-                }
-                return bot.sendMessage(userId, `✅ **Profile Saved!**\n💰 50 Free Credits added.`);
-            }
-
-            // AGENT SELECTION
-            if (data.action === 'select_agent') {
-                const agent = await db.get('SELECT * FROM agents WHERE id = ?', data.agent_id);
-                if (!agent) return;
-                
-                await db.run('INSERT OR IGNORE INTO rooms (user_id, agent_id) VALUES (?, ?)', [userId, agent.id]);
-                await db.run('UPDATE users SET active_room_id = (SELECT id FROM rooms WHERE user_id=? AND agent_id=?) WHERE user_id=?', [userId, agent.id, userId]);
-                
-                bot.sendMessage(userId, `💬 **Connected with ${agent.name}.**`, { 
-                    reply_markup: {
-                        keyboard: [['📸 Pic (15)', '🎥 Video (50)'], ['🎁 Gift (5)', '💳 Balance'], ['❌ Leave Chat']],
-                        resize_keyboard: true
-                    }
-                });
-            }
-        } catch (e) {
-            console.error("Web App Data Error:", e);
-        }
-    }
-
-    // B. Chat Handler
-    if (!msg.text || msg.text.startsWith('/')) return;
-    const userId = msg.chat.id;
-    
-    // Admin replying
-    if (userId === ADMIN_ID && msg.reply_to_message) {
-        const match = msg.reply_to_message.text.match(/🆔 ID: (\d+)/);
-        if (match) bot.sendMessage(match[1], msg.text);
-        return;
-    }
-
-    // User chatting
-    const user = await db.get(`
-        SELECT u.credits, a.name, a.is_online, u.active_room_id 
-        FROM users u JOIN rooms r ON u.active_room_id = r.id JOIN agents a ON r.agent_id = a.id 
-        WHERE u.user_id = ?`, userId);
-
-    if (!user) return; // Not in room
-
-    if (msg.text === '❌ Leave Chat') {
-        await db.run('UPDATE users SET active_room_id = NULL WHERE user_id = ?', userId);
-        return bot.sendMessage(userId, "👋 Left chat.", { reply_markup: { remove_keyboard: true } });
-    }
-
-    if (user.credits <= 0) return bot.sendMessage(userId, "🔒 **Out of credits.** Top up to continue.");
-    await db.run('UPDATE users SET credits = credits - 1 WHERE user_id = ?', userId);
-
-    if (user.is_online) {
-        bot.sendMessage(ADMIN_ID, `🔌 **${user.name}** (Client: ${msg.from.first_name})\n🆔 ID: ${userId}\n\n"${msg.text}"`);
-    } else {
-        bot.sendChatAction(userId, 'typing');
-        setTimeout(() => bot.sendMessage(userId, "That's interesting... tell me more!"), 2000);
-    }
-});
