@@ -320,8 +320,13 @@ async function handleWebAppData(msg) {
     const data = JSON.parse(msg.web_app_data.data);
 
     if (data.action === 'register_new_user') {
-        await db.run(`UPDATE users SET credits = 50 WHERE user_id = ?`, userId);
-        return bot.sendMessage(userId, `✅ **Welcome!** 50 Free Credits added.`);
+        // Create user if missing, OR update credits if they exist
+        await db.run(`
+            INSERT INTO users (user_id, first_name, credits) VALUES (?, 'New User', 50)
+            ON CONFLICT(user_id) DO UPDATE SET credits = 50
+        `, [userId]);
+        
+        return bot.sendMessage(userId, `✅ **Registration Complete!**\n\n💰 50 Free Credits added.`);
     }
 
     // Agent Selection (Using ID from API data)
