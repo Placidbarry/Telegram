@@ -18,6 +18,7 @@ const axios = require('axios'); // NEW: To download photos
 // =========================================================
 const app = express();
 app.use(cors());
+app.use(express.json()); // <--- IMPORTANT: Needed for Webhooks
 const PORT = process.env.PORT || 8080;
 
 // NEW: Setup Image Hosting Folder
@@ -43,7 +44,20 @@ if (!BOT_TOKEN || !WEBAPP_URL) {
 
 app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
 
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+// --- WEBHOOK CONFIGURATION (Fixes 409 Conflict) ---
+const bot = new TelegramBot(BOT_TOKEN); // No polling: true
+
+// 1. Tell Telegram where to send messages
+const webhookUrl = `${SERVER_URL}/bot${BOT_TOKEN}`;
+bot.setWebHook(webhookUrl);
+console.log(`🔗 Webhook set to: ${webhookUrl}`);
+
+// 2. Create a route to receive updates
+app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+    bot.processUpdate(req.body);
+    res.sendStatus(200);
+});
+// --------------------------------------------------
 // NEW API: The Web App will call this to get the agent list
 app.get('/api/agents', async (req, res) => {
     try {
