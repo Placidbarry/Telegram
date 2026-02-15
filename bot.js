@@ -11,14 +11,27 @@ const express = require('express');
 const cors = require('cors'); // NEW: Allows WebApp to get data
 const fs = require('fs');
 const path = require('path');
-const axios = require('axios'); // NEW: To download photos
+const axios = require('axios'); 
+const multer = require('multer'); // NEW: File Handler
 
-// =========================================================
-// 1. CONFIGURATION & SERVER
-// =========================================================
+// ... 
 const app = express();
 app.use(cors());
-app.use(express.json()); // <--- IMPORTANT: Needed for Webhooks
+app.use(express.json()); 
+
+// SETUP UPLOADS FOR CLIENTS
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+    filename: (req, file, cb) => cb(null, 'client-' + Date.now() + '.jpg')
+});
+const upload = multer({ storage: storage });
+
+// API: Handle Client Photo Upload
+app.post('/api/upload_client', upload.single('photo'), (req, res) => {
+    if(req.file) res.json({ url: `${SERVER_URL}/uploads/${req.file.filename}` });
+    else res.status(400).send("Error");
+});
+
 const PORT = process.env.PORT || 8080;
 
 // NEW: Setup Image Hosting Folder
@@ -99,7 +112,9 @@ let db;
             first_name TEXT,
             username TEXT,
             credits INTEGER DEFAULT 0, 
-            active_room_id INTEGER
+            active_room_id INTEGER,
+            profile_photo TEXT, 
+            real_name TEXT      
         );
     `);
 
@@ -182,10 +197,30 @@ bot.onText(/\/edit (.+)/, async (msg, match) => {
     const agent = await db.get('SELECT * FROM agents WHERE name = ?', name);
     if (!agent) return bot.sendMessage(ADMIN_ID, `❌ Agent "${name}" not found.`);
 
-    // Start editing flow
-    adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: agent.id };
-    bot.sendMessage(ADMIN_ID, `✏️ **Editing ${name}**\n\nSend me **Photo #1** (Main Profile Picture).\n(Or type "skip" to keep current).`);
+    // Start with AGE
+    adminState[ADMIN_ID] = { step: 'EDIT_AGE', agent_id: agent.id };
+    bot.sendMessage(ADMIN_ID, `✏️ **Editing ${name}**\n\nFirst, enter the **Age** (e.g. 24):`);
 });
+
+// ... inside handleAdminFlow function ...
+
+async function handleAdminFlow(msg) {
+    const state = adminState[ADMIN_ID];
+
+    // NEW STEP: Handle Age
+    if (state.step === 'EDIT_AGE') {
+        const age = parseInt(msg.text);
+        if(!isNaN(age)) {
+            await db.run('UPDATE agents SET age = ? WHERE id = ?', [age, state.agent_id]);
+            // Now move to photos
+            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: state.agent_id };
+            bot.sendMessage(ADMIN_ID, "✅ Age Updated.\n\nNow upload **Photo #1** (or type 'skip').");
+        } else {
+            bot.sendMessage(ADMIN_ID, "⚠️ Please enter a number for Age.");
+        }
+        return;
+    }
+    
 
 // --- DELETE AGENT (NEW) ---
 bot.onText(/\/delete (.+)/, async (msg, match) => {
