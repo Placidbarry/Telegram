@@ -403,7 +403,7 @@ async function handleAdminFlow(msg) {
 }
 
 // ----------------------------------------------------------------------
-// WEBAPP DATA HANDLER
+// WEBAPP DATA HANDLER (with fallback user creation)
 // ----------------------------------------------------------------------
 async function handleWebAppData(msg) {
     const userId = msg.chat.id;
@@ -435,10 +435,20 @@ async function handleWebAppData(msg) {
             return bot.sendMessage(userId, `✅ **Profile Saved!**\n💰 50 Free Credits added.`);
         }
 
-        // AGENT SELECTION
+        // AGENT SELECTION (with fallback user creation)
         if (data.action === 'select_agent' && data.agent_id) {
             const agent = await db.get('SELECT * FROM agents WHERE id = ?', data.agent_id);
             if (!agent) return;
+
+            // Ensure user exists (fallback in case record was deleted)
+            let user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
+            if (!user) {
+                await db.run(
+                    `INSERT INTO users (user_id, first_name, credits) VALUES (?, ?, 0)`,
+                    [userId, msg.from.first_name || 'User']
+                );
+                user = { credits: 0 };
+            }
 
             await db.run(`
                 INSERT OR IGNORE INTO rooms (user_id, agent_id) VALUES (?, ?)
@@ -450,7 +460,6 @@ async function handleWebAppData(msg) {
                 ) WHERE user_id = ?
             `, [userId, agent.id, userId]);
 
-            const user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
             if (user.credits > 0) {
                 bot.sendMessage(userId, `💬 **Connected with ${agent.name}.**`, {
                     reply_markup: {
@@ -573,6 +582,16 @@ app.post('/api/upload_client', upload.single('photo'), (req, res) => {
         res.json({ url: `${SERVER_URL}/uploads/${req.file.filename}` });
     } else {
         res.status(400).send("Error");
+    }
+});
+
+// NEW: Check if a user exists in the database
+app.get('/api/user/:userId', async (req, res) => {
+    try {
+        const user = await db.get('SELECT user_id FROM users WHERE user_id = ?', req.params.userId);
+        res.json({ exists: !!user });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
     }
 });
 
