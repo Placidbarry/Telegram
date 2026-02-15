@@ -503,9 +503,191 @@ bot.onText(/\/confirm_wipe/, async (msg) => {
 bot.onText(/\/reset_clients/, async (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
     
-    await db.run('DELETE FROM users');
-    await db.run('DELETE FROM rooms');
-    // Don't delete agents!
+    try {
+        await db.run('DELETE FROM users');
+        await db.run('DELETE FROM rooms');
+        // Don't delete agents!
+        bot.sendMessage(ADMIN_ID, "✅ **Clients Wiped.**\nAll user accounts and chats deleted.\nModels are SAFE.");
+    } catch (e) {
+        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
+    }
+});
+
+// --- COMMAND: Create Agent ---
+bot.onText(/\/create/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    adminState[ADMIN_ID] = { step: 'CREATE_NAME', data: {} };
+    bot.sendMessage(ADMIN_ID, "🆕 **New Model Name:**");
+});
+
+// --- COMMAND: Delete Agent ---
+bot.onText(/\/delete (.+)/, async (msg, match) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    await db.run('DELETE FROM agents WHERE name = ?', match[1]);
+    bot.sendMessage(ADMIN_ID, `🗑️ Deleted ${match[1]}.`);
+});
+
+// --- ADMIN STATE HANDLER (Photos) ---
+bot.on('message', async (msg) => {
+    if (msg.chat.id !== ADMIN_ID || !adminState[ADMIN_ID]) return;
+    const state = adminState[ADMIN_ID];
+
+    // 1. Create Name
+    if (state.step === 'CREATE_NAME') {
+        try {
+            const res = await db.run('INSERT INTO agents (name) VALUES (?)', msg.text);
+            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: res.lastID };
+            bot.sendMessage(ADMIN_ID, `✅ Created **${msg.text}**. Upload Photo #1.`);
+        } catch (e) { bot.sendMessage(ADMIN_ID, "❌ Name taken."); }
+        return;
+    }
+
+    // 2. Handle Age Edit
+    if (state.step === 'EDIT_AGE') {
+        const age = parseInt(msg.text);
+        if(!isNaN(age)) {
+            await db.run('UPDATE agents SET age = ? WHERE id = ?', [age, state.agent_id]);
+            // Now move to photos
+            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: state.agent_id };
+            bot.sendMessage(ADMIN_ID, "✅ Age Updated.\n\nNow upload **Photo #1** (or type 'skip').");
+        } else {
+            bot.sendMessage(ADMIN_ID, "⚠️ Please enter a number for Age.");
+        }
+        return;
+    }
+
+    // 3. Handle Photos
+    if (state.step.startsWith('EDIT_photos_')) {
+        const idx = state.step.split('_')[2];
+        const col = `photo${idx}`;
+        
+        if (msg.text && msg.text.toLowerCase() === 'skip') {
+            return advancePhoto(state.agent_id, parseInt(idx));
+        }
+
+        if (msg.photo) {
+            const fileId = msg.photo[msg.photo.length - 1].file_id;
+            const fileName = `agent_${state.agent_id}_p${idx}_${Date.now()}.jpg`;
+            
+            try {
+                const fileLink = await bot.getFileLink(fileId);
+                const writer = fs.createWriteStream(path.join(UPLOAD_DIR, fileName));
+                const response = await axios({ url: fileLink, responseType: 'stream' });
+                response.data.pipe(writer);
+                
+                writer.on('finish', async () => {
+                    await db.run(`UPDATE agents SET ${col} = ? WHERE id = ?`, [fileName, state.agent_id]);
+                    bot.sendMessage(ADMIN_ID, `✅ Photo ${idx} saved.`);
+                    advancePhoto(state.agent_id, parseInt(idx));
+                });
+            } catch (e) {
+                bot.sendMessage(ADMIN_ID, "❌ Error saving photo.");
+            }
+        }
+    }
+});
+
+function advancePhoto(id, current) {
+    if (current < 3) {
+        adminState[ADMIN_ID] = { step: `EDIT_photos_${current + 1}`, agent_id: id };
+        bot.sendMessage(ADMIN_ID, `Upload **Photo #${current + 1}** (or 'skip').`);
+    } else {
+        delete adminState[ADMIN_ID];
+        bot.sendMessage(ADMIN_ID, "🎉 **Done!**");
+    }
+}
+
+// =========================================================
+// 5. USER HANDLERS (Start, Register, Chat)
+// =========================================================
+
+bot.onText(/\/start/, async (msg) => {
+    const userId = msg.from.id;
+    // Fix: Using INSERT OR IGNORE logic
+    await db.run(`INSERT INTO users (user_id, first_name, credits) VALUES (?, ?, 0) ON CONFLICT(user_id) DO NOTHING`, [userId, msg.from.first_name]);
     
-    bot.sendMessage(ADMIN_ID, "✅ **Clients Wiped.**\nAll user accounts and chats deleted.\nModels are SAFE.");
-}); 
+    bot.sendMessage(userId, `🔥 **Welcome, ${msg.from.first_name}.**`, {
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard: [[{ text: "💋 Enter Agency", web_app: { url: WEBAPP_URL } }]] }
+    });
+});
+
+bot.on('message', async (msg) => {
+    // A. WebApp Data Handler
+    if (msg.web_app_data) {
+        const userId = msg.chat.id;
+        try {
+            const data = JSON.parse(msg.web_app_data.data);
+
+            // REGISTRATION (With Profile Photo Support)
+            if (data.action === 'register_new_user') {
+                const { age, country, photo_url } = data.user_data;
+                // Update user with details and photo
+                await db.run(`
+                    INSERT INTO users (user_id, first_name, credits, profile_photo) 
+                    VALUES (?, ?, 50, ?)
+                    ON CONFLICT(user_id) DO UPDATE SET 
+                    credits = 50, profile_photo = ?
+                `, [userId, msg.from.first_name, photo_url || null, photo_url || null]);
+                
+                // Forward New Profile to Admin
+                if(photo_url) {
+                    bot.sendMessage(ADMIN_ID, `🆕 **New Client:** ${msg.from.first_name} (${age}, ${country})\nPhoto: ${photo_url}`);
+                }
+                return bot.sendMessage(userId, `✅ **Profile Saved!**\n💰 50 Free Credits added.`);
+            }
+
+            // AGENT SELECTION
+            if (data.action === 'select_agent') {
+                const agent = await db.get('SELECT * FROM agents WHERE id = ?', data.agent_id);
+                if (!agent) return;
+                
+                await db.run('INSERT OR IGNORE INTO rooms (user_id, agent_id) VALUES (?, ?)', [userId, agent.id]);
+                await db.run('UPDATE users SET active_room_id = (SELECT id FROM rooms WHERE user_id=? AND agent_id=?) WHERE user_id=?', [userId, agent.id, userId]);
+                
+                bot.sendMessage(userId, `💬 **Connected with ${agent.name}.**`, { 
+                    reply_markup: {
+                        keyboard: [['📸 Pic (15)', '🎥 Video (50)'], ['🎁 Gift (5)', '💳 Balance'], ['❌ Leave Chat']],
+                        resize_keyboard: true
+                    }
+                });
+            }
+        } catch (e) {
+            console.error("Web App Data Error:", e);
+        }
+    }
+
+    // B. Chat Handler
+    if (!msg.text || msg.text.startsWith('/')) return;
+    const userId = msg.chat.id;
+    
+    // Admin replying
+    if (userId === ADMIN_ID && msg.reply_to_message) {
+        const match = msg.reply_to_message.text.match(/🆔 ID: (\d+)/);
+        if (match) bot.sendMessage(match[1], msg.text);
+        return;
+    }
+
+    // User chatting
+    const user = await db.get(`
+        SELECT u.credits, a.name, a.is_online, u.active_room_id 
+        FROM users u JOIN rooms r ON u.active_room_id = r.id JOIN agents a ON r.agent_id = a.id 
+        WHERE u.user_id = ?`, userId);
+
+    if (!user) return; // Not in room
+
+    if (msg.text === '❌ Leave Chat') {
+        await db.run('UPDATE users SET active_room_id = NULL WHERE user_id = ?', userId);
+        return bot.sendMessage(userId, "👋 Left chat.", { reply_markup: { remove_keyboard: true } });
+    }
+
+    if (user.credits <= 0) return bot.sendMessage(userId, "🔒 **Out of credits.** Top up to continue.");
+    await db.run('UPDATE users SET credits = credits - 1 WHERE user_id = ?', userId);
+
+    if (user.is_online) {
+        bot.sendMessage(ADMIN_ID, `🔌 **${user.name}** (Client: ${msg.from.first_name})\n🆔 ID: ${userId}\n\n"${msg.text}"`);
+    } else {
+        bot.sendChatAction(userId, 'typing');
+        setTimeout(() => bot.sendMessage(userId, "That's interesting... tell me more!"), 2000);
+    }
+});
