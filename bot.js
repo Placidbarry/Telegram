@@ -498,3 +498,14 @@ bot.onText(/\/confirm_wipe/, async (msg) => {
         bot.sendMessage(msg.chat.id, `❌ Error wiping DB: ${error.message}`);
     }
 });
+
+// NEW COMMAND: Only wipes Clients (Users/Rooms), Keeps Agents (Models) safe.
+bot.onText(/\/reset_clients/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    
+    await db.run('DELETE FROM users');
+    await db.run('DELETE FROM rooms');
+    // Don't delete agents!
+    
+    bot.sendMessage(ADMIN_ID, "✅ **Clients Wiped.**\nAll user accounts and chats deleted.\nModels are SAFE.");
+}); 
