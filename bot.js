@@ -379,3 +379,35 @@ bot.onText(/\/offline (.+)/, async (msg, match) => {
     await db.run('UPDATE agents SET is_online = 0 WHERE name = ?', match[1]);
     bot.sendMessage(ADMIN_ID, `🔴 ${match[1]} is OFFLINE.`);
 }); 
+// =========================================================
+// 7. DANGER ZONE: WIPE DATABASE COMMAND
+// =========================================================
+
+bot.onText(/\/wipe_all_data/, async (msg) => {
+    // Security Check: Only ADMIN can do this
+    if (msg.chat.id !== ADMIN_ID) return;
+
+    // Double Check Confirmation
+    bot.sendMessage(msg.chat.id, "⚠️ **WARNING** ⚠️\n\nThis will delete:\n- All Users & Credits\n- All Created Agents\n- All Chat Rooms\n\nType `/confirm_wipe` to proceed.");
+});
+
+bot.onText(/\/confirm_wipe/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+
+    try {
+        // Delete all rows from tables
+        await db.run('DELETE FROM users');
+        await db.run('DELETE FROM agents');
+        await db.run('DELETE FROM rooms');
+        
+        // Optional: Reset the Auto-Increment counters (start IDs from 1 again)
+        await db.run('DELETE FROM sqlite_sequence WHERE name="users"');
+        await db.run('DELETE FROM sqlite_sequence WHERE name="agents"');
+        await db.run('DELETE FROM sqlite_sequence WHERE name="rooms"');
+
+        bot.sendMessage(msg.chat.id, "✅ **Database Wiped Successfully.**\n\nSystem is fresh. You can now `/create` new models.");
+        console.log("Database wiped by Admin.");
+    } catch (error) {
+        bot.sendMessage(msg.chat.id, `❌ Error wiping DB: ${error.message}`);
+    }
+});
