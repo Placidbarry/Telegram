@@ -133,8 +133,36 @@ let db;
 })();
 
 // =========================================================
-// 3. ADMIN DASHBOARD (CREATE, EDIT, DELETE)
+// 3.5. USER WELCOME FLOW (Fixed: Missing /start)
 // =========================================================
+
+bot.onText(/\/start/, async (msg) => {
+    const userId = msg.from.id;
+    const firstName = msg.from.first_name || 'User';
+    const username = msg.from.username || '';
+
+    try {
+        // 1. Save User to Database (Ignore if already exists)
+        await db.run(
+            `INSERT INTO users (user_id, first_name, username, credits) VALUES (?, ?, ?, 0)
+             ON CONFLICT(user_id) DO UPDATE SET first_name = ?`,
+            [userId, firstName, username, firstName]
+        );
+
+        // 2. Send Welcome Message with App Link
+        bot.sendMessage(userId, 
+            `🔥 **Welcome, ${firstName}.**\n\nTap below to enter the agency and browse models.`, 
+            {
+                parse_mode: 'Markdown',
+                reply_markup: {
+                    inline_keyboard: [[{ text: "💋 Enter Agency", web_app: { url: WEBAPP_URL } }]]
+                }
+            }
+        );
+    } catch (e) {
+        console.error("Start Error:", e);
+    }
+});
 
 // State Machine: Tracks if Admin is currently uploading a photo
 const adminState = {}; 
