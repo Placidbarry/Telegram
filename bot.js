@@ -25,17 +25,25 @@ const UPLOAD_DIR = path.join(__dirname, 'public/uploads');
 if (!fs.existsSync(UPLOAD_DIR)) {
     fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
-// This allows the internet to see your images at: /uploads/image.jpg
 app.use('/uploads', express.static(UPLOAD_DIR));
 
-// YOUR CREDENTIALS (Preserved from your upload)
-const BOT_TOKEN = '8577711169:AAExdUa5Yzp4113lIwi9IXHQnAB6O3LOHak';
-const WEBAPP_URL = 'https://placidbarry.github.io/sync-hearts-app/'; 
-const ADMIN_ID = 7640605912; 
-// Change this to your live URL when deploying (e.g. https://myapp.onrender.com)
-// For local testing, keep localhost.
-const SERVER_URL = process.env.SERVER_URL || `http://localhost:${PORT}`;
+// SECURE CONFIGURATION (Reads from Render Environment)
+const BOT_TOKEN = process.env.BOT_TOKEN; 
+const WEBAPP_URL = process.env.WEBAPP_URL; 
+const ADMIN_ID = Number(process.env.ADMIN_ID); 
 
+// SERVER URL: Finds your Render link automatically, or defaults to localhost
+const SERVER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+
+// Safety Check
+if (!BOT_TOKEN || !WEBAPP_URL) {
+    console.error("❌ CRITICAL ERROR: Missing BOT_TOKEN or WEBAPP_URL in Environment Variables.");
+    process.exit(1);
+}
+
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 // NEW API: The Web App will call this to get the agent list
 app.get('/api/agents', async (req, res) => {
     try {
@@ -62,9 +70,6 @@ app.get('/api/agents', async (req, res) => {
     }
 });
 
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
-
-const bot = new TelegramBot(BOT_TOKEN, { polling: true });
 
 // =========================================================
 // 2. DATABASE SETUP (UPGRADED)
