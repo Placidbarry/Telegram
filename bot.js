@@ -1,73 +1,32 @@
 /**
- * SYNC HEARTS AGENCY — ULTIMATE EDITION
- * Features: Create/Edit/Delete Models, API, File Hosting, Admin Dashboard
+ * SYNC HEARTS AGENCY — INLINE KEYBOARD EDITION
+ * No web app – all interactions via inline keyboards.
  */
 
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const sqlite3 = require('sqlite3').verbose();
 const { open } = require('sqlite');
-const express = require('express');
-const cors = require('cors');
-const fs = require('fs');
-const path = require('path');
-const axios = require('axios');
-const multer = require('multer');
-
-// ----------------------------------------------------------------------
-// EXPRESS SETUP
-// ----------------------------------------------------------------------
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-const PORT = process.env.PORT || 8080;
-
-// Create upload directory if it doesn't exist
-const UPLOAD_DIR = path.join(__dirname, 'public/uploads');
-if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
-app.use('/uploads', express.static(UPLOAD_DIR));
-
-// Multer configuration for client photo uploads
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, UPLOAD_DIR),
-    filename: (req, file, cb) => cb(null, 'client-' + Date.now() + '.jpg')
-});
-const upload = multer({ storage: storage });
 
 // ----------------------------------------------------------------------
 // ENVIRONMENT VARIABLES
 // ----------------------------------------------------------------------
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const WEBAPP_URL = process.env.WEBAPP_URL;
 const ADMIN_ID = Number(process.env.ADMIN_ID);
-const SERVER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
-if (!BOT_TOKEN || !WEBAPP_URL) {
-    console.error("❌ CRITICAL ERROR: Missing BOT_TOKEN or WEBAPP_URL in Environment Variables.");
+if (!BOT_TOKEN) {
+    console.error("❌ CRITICAL ERROR: Missing BOT_TOKEN in Environment Variables.");
     process.exit(1);
 }
 
 // ----------------------------------------------------------------------
-// TELEGRAM BOT (WEBHOOK MODE)
+// TELEGRAM BOT (POLLING MODE)
 // ----------------------------------------------------------------------
-const bot = new TelegramBot(BOT_TOKEN); // no polling
-
-// Set webhook
-const webhookUrl = `${SERVER_URL}/bot${BOT_TOKEN}`;
-bot.setWebHook(webhookUrl);
-console.log(`🔗 Webhook set to: ${webhookUrl}`);
-
-// Route for Telegram updates
-app.post(`/bot${BOT_TOKEN}`, (req, res) => {
-    bot.processUpdate(req.body);
-    res.sendStatus(200);
-});
+const bot = new TelegramBot(BOT_TOKEN, { polling: true });
+console.log("✅ Bot started with polling");
 
 // ----------------------------------------------------------------------
-// DATABASE (initialized asynchronously)
+// DATABASE
 // ----------------------------------------------------------------------
 let db;
 
@@ -81,8 +40,11 @@ let db;
             username TEXT,
             credits INTEGER DEFAULT 0,
             active_room_id INTEGER,
-            profile_photo TEXT,
-            real_name TEXT
+            age INTEGER,
+            country TEXT,
+            looking_for TEXT,
+            profile_photo_file_id TEXT,
+            registered INTEGER DEFAULT 0
         );
     `);
 
@@ -92,9 +54,9 @@ let db;
             name TEXT UNIQUE,
             age INTEGER DEFAULT 23,
             location TEXT DEFAULT 'Paris',
-            photo1 TEXT,
-            photo2 TEXT,
-            photo3 TEXT,
+            photo1_file_id TEXT,
+            photo2_file_id TEXT,
+            photo3_file_id TEXT,
             is_online INTEGER DEFAULT 0,
             admin_chat_id INTEGER
         );
@@ -115,487 +77,478 @@ let db;
 })();
 
 // ----------------------------------------------------------------------
-// HELPER FUNCTIONS
+// USER STATE MACHINE (for registration flow)
 // ----------------------------------------------------------------------
-async function downloadTelegramFile(fileId, fileName) {
-    try {
-        const fileLink = await bot.getFileLink(fileId);
-        const response = await axios({ url: fileLink, responseType: 'stream' });
-        const filePath = path.join(UPLOAD_DIR, fileName);
-
-        return new Promise((resolve) => {
-            const writer = fs.createWriteStream(filePath);
-            response.data.pipe(writer);
-            writer.on('finish', () => resolve(true));
-            writer.on('error', () => resolve(false));
-        });
-    } catch (e) {
-        console.error("Download error:", e);
-        return false;
-    }
-}
-
-function advancePhotoStep(agentId, currentStep) {
-    if (currentStep < 3) {
-        const next = currentStep + 1;
-        adminState[ADMIN_ID] = { step: `EDIT_photos_${next}`, agent_id: agentId };
-        bot.sendMessage(ADMIN_ID, `📸 Send **Photo #${next}** (or 'skip').`);
-    } else {
-        delete adminState[ADMIN_ID];
-        bot.sendMessage(ADMIN_ID, "🎉 **Setup Complete!**\nAgent is live on the API.");
-    }
-}
+const userState = {}; // { userId: { step: 'awaiting_name', data: {} } }
 
 // ----------------------------------------------------------------------
-// ADMIN STATE MACHINE
+// ADMIN STATE MACHINE (for agent creation/editing)
 // ----------------------------------------------------------------------
 const adminState = {};
 
 // ----------------------------------------------------------------------
-// COMMAND HANDLERS (using onText)
+// HELPER FUNCTIONS
+// ----------------------------------------------------------------------
+function escapeMarkdown(text) {
+    return text.replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
+}
+
+// ----------------------------------------------------------------------
+// MAIN MENU INLINE KEYBOARD
+// ----------------------------------------------------------------------
+function getMainMenu() {
+    return {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "👥 Browse Agents", callback_data: "browse_agents" }],
+                [{ text: "💳 My Credits", callback_data: "my_credits" }],
+                [{ text: "📞 Support", callback_data: "support" }]
+            ]
+        }
+    };
+}
+
+// ----------------------------------------------------------------------
+// REGISTRATION FLOW
+// ----------------------------------------------------------------------
+async function startRegistration(userId, firstName) {
+    userState[userId] = { step: 'awaiting_name', data: {} };
+    await bot.sendMessage(userId, "Let's create your profile! What's your name?");
+}
+
+// Handle registration steps
+async function handleRegistrationMessage(msg) {
+    const userId = msg.chat.id;
+    const text = msg.text;
+    const state = userState[userId];
+
+    if (state.step === 'awaiting_name') {
+        state.data.name = text;
+        state.step = 'awaiting_age';
+        await bot.sendMessage(userId, "Great! How old are you?");
+    }
+    else if (state.step === 'awaiting_age') {
+        const age = parseInt(text);
+        if (isNaN(age) || age < 18) {
+            await bot.sendMessage(userId, "Please enter a valid age (18+).");
+            return;
+        }
+        state.data.age = age;
+        state.step = 'awaiting_country';
+        await bot.sendMessage(userId, "Which country are you from?");
+    }
+    else if (state.step === 'awaiting_country') {
+        state.data.country = text;
+        state.step = 'awaiting_looking_for';
+        await bot.sendMessage(userId, "Are you looking for:", {
+            reply_markup: {
+                inline_keyboard: [
+                    [{ text: "Women 💃", callback_data: "looking_female" }],
+                    [{ text: "Men 🕺", callback_data: "looking_male" }],
+                    [{ text: "Both", callback_data: "looking_both" }]
+                ]
+            }
+        });
+    }
+}
+
+// Handle callback queries for registration
+async function handleRegistrationCallback(query) {
+    const userId = query.from.id;
+    const data = query.data;
+    const state = userState[userId];
+    if (!state) return;
+
+    if (data.startsWith('looking_')) {
+        state.data.lookingFor = data.replace('looking_', '');
+        // Registration complete – save to database
+        await db.run(`
+            INSERT INTO users (user_id, first_name, credits, age, country, looking_for, registered)
+            VALUES (?, ?, 50, ?, ?, ?, 1)
+            ON CONFLICT(user_id) DO UPDATE SET
+                first_name = ?,
+                age = ?,
+                country = ?,
+                looking_for = ?,
+                registered = 1,
+                credits = 50
+        `, [
+            userId, state.data.name, state.data.age, state.data.country, state.data.lookingFor,
+            state.data.name, state.data.age, state.data.country, state.data.lookingFor
+        ]);
+        delete userState[userId];
+        await bot.sendMessage(userId, 
+            `✅ Registration complete! You've received 50 free credits.\n\nWelcome, ${state.data.name}!`,
+            getMainMenu()
+        );
+        await bot.answerCallbackQuery(query.id);
+    }
+}
+
+// ----------------------------------------------------------------------
+// BROWSE AGENTS (inline keyboard pagination)
+// ----------------------------------------------------------------------
+async function showAgentList(userId, page = 0) {
+    const agents = await db.all('SELECT id, name, age, location FROM agents ORDER BY id');
+    const pageSize = 5;
+    const totalPages = Math.ceil(agents.length / pageSize);
+
+    if (agents.length === 0) {
+        await bot.sendMessage(userId, "No agents available at the moment.");
+        return;
+    }
+
+    const start = page * pageSize;
+    const end = start + pageSize;
+    const pageAgents = agents.slice(start, end);
+
+    const buttons = pageAgents.map(a => ([
+        { text: `${a.name}, ${a.age} (${a.location})`, callback_data: `select_agent_${a.id}` }
+    ]));
+
+    // Navigation buttons
+    const navButtons = [];
+    if (page > 0) navButtons.push({ text: "◀️ Previous", callback_data: `agent_page_${page-1}` });
+    if (page < totalPages - 1) navButtons.push({ text: "Next ▶️", callback_data: `agent_page_${page+1}` });
+    if (navButtons.length) buttons.push(navButtons);
+
+    await bot.sendMessage(userId, "Select an agent to chat:", {
+        reply_markup: { inline_keyboard: buttons }
+    });
+}
+
+// ----------------------------------------------------------------------
+// START CHAT WITH AGENT
+// ----------------------------------------------------------------------
+async function startChat(userId, agentId) {
+    const agent = await db.get('SELECT * FROM agents WHERE id = ?', agentId);
+    if (!agent) return bot.sendMessage(userId, "Agent not found.");
+
+    // Ensure user exists (if somehow not registered)
+    let user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
+    if (!user) {
+        // Create a minimal user with 0 credits
+        await db.run(
+            'INSERT INTO users (user_id, first_name, credits, registered) VALUES (?, ?, 0, 1)',
+            [userId, "User"]
+        );
+        user = { credits: 0 };
+    }
+
+    // Create or get room
+    await db.run(`
+        INSERT OR IGNORE INTO rooms (user_id, agent_id) VALUES (?, ?)
+    `, [userId, agentId]);
+
+    await db.run(`
+        UPDATE users SET active_room_id = (
+            SELECT id FROM rooms WHERE user_id = ? AND agent_id = ?
+        ) WHERE user_id = ?
+    `, [userId, agentId, userId]);
+
+    // Send chat interface
+    const chatKeyboard = {
+        reply_markup: {
+            inline_keyboard: [
+                [{ text: "📸 Send Pic (15 credits)", callback_data: `chat_pic_${agentId}` }],
+                [{ text: "💳 Balance", callback_data: "chat_balance" }],
+                [{ text: "❌ Leave Chat", callback_data: "chat_leave" }]
+            ]
+        }
+    };
+
+    await bot.sendMessage(userId, `💬 You are now chatting with ${agent.name}.`, chatKeyboard);
+}
+
+// ----------------------------------------------------------------------
+// HANDLE CHAT ACTIONS
+// ----------------------------------------------------------------------
+async function handleChatCallback(query) {
+    const userId = query.from.id;
+    const data = query.data;
+
+    if (data === "chat_balance") {
+        const user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
+        await bot.answerCallbackQuery(query.id, { text: `You have ${user?.credits || 0} credits.`, show_alert: true });
+    }
+    else if (data === "chat_leave") {
+        await db.run('UPDATE users SET active_room_id = NULL WHERE user_id = ?', userId);
+        await bot.sendMessage(userId, "You left the chat.", getMainMenu());
+        await bot.answerCallbackQuery(query.id);
+    }
+    else if (data.startsWith("chat_pic_")) {
+        const agentId = data.split('_')[2];
+        const agent = await db.get('SELECT * FROM agents WHERE id = ?', agentId);
+        if (!agent) return;
+
+        const user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
+        if (user.credits < 15) {
+            await bot.answerCallbackQuery(query.id, { text: "❌ Not enough credits.", show_alert: true });
+            return;
+        }
+
+        await db.run('UPDATE users SET credits = credits - 15 WHERE user_id = ?', userId);
+
+        if (agent.photo1_file_id) {
+            await bot.sendPhoto(userId, agent.photo1_file_id, { caption: "Here's your private pic 😘" });
+        } else {
+            await bot.sendMessage(userId, "No photo available.");
+        }
+        await bot.answerCallbackQuery(query.id);
+    }
+}
+
+// ----------------------------------------------------------------------
+// COMMAND HANDLERS
 // ----------------------------------------------------------------------
 
-// /start - User welcome
+// /start – Entry point
 bot.onText(/\/start/, async (msg) => {
     const userId = msg.from.id;
     const firstName = msg.from.first_name || 'User';
-    const username = msg.from.username || '';
 
-    try {
-        if (!db) return bot.sendMessage(userId, "System initializing, please try again later.");
-
-        await db.run(
-            `INSERT INTO users (user_id, first_name, username, credits) VALUES (?, ?, ?, 0)
-             ON CONFLICT(user_id) DO UPDATE SET first_name = ?`,
-            [userId, firstName, username, firstName]
-        );
-
-        bot.sendMessage(userId,
-            `🔥 **Welcome, ${firstName}.**\n\nTap below to enter the agency and browse models.`,
-            {
-                parse_mode: 'Markdown',
-                reply_markup: {
-                    inline_keyboard: [[{ text: "💋 Enter Agency", web_app: { url: WEBAPP_URL } }]]
-                }
-            }
-        );
-    } catch (e) {
-        console.error("Start Error:", e);
+    // Check if user is already registered
+    const user = await db.get('SELECT registered FROM users WHERE user_id = ?', userId);
+    if (user && user.registered) {
+        await bot.sendMessage(userId, `Welcome back, ${firstName}!`, getMainMenu());
+    } else {
+        await startRegistration(userId, firstName);
     }
 });
 
-// /create - Admin creates a new agent
+// Handle text messages for registration flow
+bot.on('message', async (msg) => {
+    if (!msg.text || msg.text.startsWith('/')) return;
+    const userId = msg.chat.id;
+
+    // Check if user is in registration flow
+    if (userState[userId]) {
+        await handleRegistrationMessage(msg);
+        return;
+    }
+
+    // Otherwise, ignore (or you can handle general chat)
+});
+
+// Handle callback queries
+bot.on('callback_query', async (query) => {
+    const userId = query.from.id;
+    const data = query.data;
+
+    // Registration callbacks
+    if (userState[userId] && data.startsWith('looking_')) {
+        await handleRegistrationCallback(query);
+        return;
+    }
+
+    // Main menu navigation
+    if (data === "browse_agents") {
+        await showAgentList(userId);
+        await bot.answerCallbackQuery(query.id);
+    }
+    else if (data === "my_credits") {
+        const user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
+        await bot.answerCallbackQuery(query.id, { text: `Credits: ${user?.credits || 0}`, show_alert: true });
+    }
+    else if (data === "support") {
+        await bot.sendMessage(userId, "Contact @admin for support.");
+        await bot.answerCallbackQuery(query.id);
+    }
+    // Agent pagination
+    else if (data.startsWith("agent_page_")) {
+        const page = parseInt(data.split('_')[2]);
+        await showAgentList(userId, page);
+        await bot.answerCallbackQuery(query.id);
+    }
+    // Select agent
+    else if (data.startsWith("select_agent_")) {
+        const agentId = data.split('_')[2];
+        await startChat(userId, agentId);
+        await bot.answerCallbackQuery(query.id);
+    }
+    // Chat actions
+    else if (data.startsWith("chat_")) {
+        await handleChatCallback(query);
+    }
+});
+
+// ----------------------------------------------------------------------
+// ADMIN COMMANDS (unchanged except for storing file_id)
+// ----------------------------------------------------------------------
+
+// /create – Admin creates a new agent
 bot.onText(/\/create/, async (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
     adminState[ADMIN_ID] = { step: 'CREATE_NAME' };
     bot.sendMessage(ADMIN_ID, "🆕 **Create New Model**\n\nPlease enter the **Name**:");
 });
 
-// /edit <name> - Admin edits an existing agent
+// /edit <name> – Admin edits an agent
 bot.onText(/\/edit (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
     const name = match[1];
-
-    try {
-        if (!db) return bot.sendMessage(ADMIN_ID, "Database not ready.");
-
-        const agent = await db.get('SELECT * FROM agents WHERE name = ?', name);
-        if (!agent) return bot.sendMessage(ADMIN_ID, `❌ Agent "${name}" not found.`);
-
-        adminState[ADMIN_ID] = { step: 'EDIT_AGE', agent_id: agent.id };
-        bot.sendMessage(ADMIN_ID, `✏️ **Editing ${name}**\n\nEnter the **Age** (e.g. 24):`);
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-    }
+    const agent = await db.get('SELECT * FROM agents WHERE name = ?', name);
+    if (!agent) return bot.sendMessage(ADMIN_ID, `❌ Agent "${name}" not found.`);
+    adminState[ADMIN_ID] = { step: 'EDIT_AGE', agent_id: agent.id };
+    bot.sendMessage(ADMIN_ID, `✏️ **Editing ${name}**\n\nEnter the **Age** (e.g. 24):`);
 });
 
-// /delete <name> - Admin deletes an agent
+// /delete <name> – Admin deletes an agent
 bot.onText(/\/delete (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
     const name = match[1];
-
-    try {
-        if (!db) return bot.sendMessage(ADMIN_ID, "Database not ready.");
-
-        const agent = await db.get('SELECT * FROM agents WHERE name = ?', name);
-        if (!agent) return bot.sendMessage(ADMIN_ID, `❌ Agent "${name}" not found.`);
-
-        await db.run('DELETE FROM agents WHERE name = ?', name);
-        bot.sendMessage(ADMIN_ID, `🗑️ **Deleted:** Agent "${name}" has been removed.`);
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-    }
+    await db.run('DELETE FROM agents WHERE name = ?', name);
+    bot.sendMessage(ADMIN_ID, `🗑️ Deleted ${name}.`);
 });
 
-// /list - List all agents
+// /list – List all agents
 bot.onText(/\/list/, async (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    try {
-        if (!db) return bot.sendMessage(ADMIN_ID, "Database not ready.");
-
-        const agents = await db.all('SELECT * FROM agents');
-        if (agents.length === 0) return bot.sendMessage(ADMIN_ID, "No agents found. Use /create");
-
-        let text = "📋 **Current Models:**\n";
-        agents.forEach(a => text += `- ${a.name} (Online: ${a.is_online ? '✅' : '🔴'})\n`);
-        bot.sendMessage(ADMIN_ID, text);
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-    }
+    const agents = await db.all('SELECT * FROM agents');
+    if (agents.length === 0) return bot.sendMessage(ADMIN_ID, "No agents found.");
+    let text = "📋 **Current Models:**\n";
+    agents.forEach(a => text += `- ${a.name} (Online: ${a.is_online ? '✅' : '🔴'})\n`);
+    bot.sendMessage(ADMIN_ID, text);
 });
 
-// /online <name> - Set agent online
+// /online /offline
 bot.onText(/\/online (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    try {
-        if (!db) return bot.sendMessage(ADMIN_ID, "Database not ready.");
-        await db.run('UPDATE agents SET is_online = 1 WHERE name = ?', match[1]);
-        bot.sendMessage(ADMIN_ID, `🟢 ${match[1]} is ONLINE.`);
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-    }
+    await db.run('UPDATE agents SET is_online = 1 WHERE name = ?', match[1]);
+    bot.sendMessage(ADMIN_ID, `🟢 ${match[1]} is ONLINE.`);
 });
-
-// /offline <name> - Set agent offline
 bot.onText(/\/offline (.+)/, async (msg, match) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    try {
-        if (!db) return bot.sendMessage(ADMIN_ID, "Database not ready.");
-        await db.run('UPDATE agents SET is_online = 0 WHERE name = ?', match[1]);
-        bot.sendMessage(ADMIN_ID, `🔴 ${match[1]} is OFFLINE.`);
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-    }
+    await db.run('UPDATE agents SET is_online = 0 WHERE name = ?', match[1]);
+    bot.sendMessage(ADMIN_ID, `🔴 ${match[1]} is OFFLINE.`);
 });
 
-// /wipe_all_data - Dangerous: wipe everything
+// Wipe commands (keep as before)
 bot.onText(/\/wipe_all_data/, async (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    bot.sendMessage(msg.chat.id, "⚠️ **WARNING** ⚠️\n\nThis will delete:\n- All Users & Credits\n- All Created Agents\n- All Chat Rooms\n\nType `/confirm_wipe` to proceed.");
+    bot.sendMessage(msg.chat.id, "⚠️ **WARNING** ⚠️\n\nThis will delete everything. Type `/confirm_wipe` to proceed.");
 });
-
-// /confirm_wipe - Actually wipe
 bot.onText(/\/confirm_wipe/, async (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    try {
-        if (!db) return bot.sendMessage(ADMIN_ID, "Database not ready.");
-
-        await db.run('DELETE FROM users');
-        await db.run('DELETE FROM agents');
-        await db.run('DELETE FROM rooms');
-        await db.run('DELETE FROM sqlite_sequence WHERE name="users"');
-        await db.run('DELETE FROM sqlite_sequence WHERE name="agents"');
-        await db.run('DELETE FROM sqlite_sequence WHERE name="rooms"');
-
-        bot.sendMessage(msg.chat.id, "✅ **Database Wiped Successfully.**\n\nSystem is fresh. You can now `/create` new models.");
-        console.log("Database wiped by Admin.");
-    } catch (error) {
-        bot.sendMessage(msg.chat.id, `❌ Error wiping DB: ${error.message}`);
-    }
+    await db.run('DELETE FROM users');
+    await db.run('DELETE FROM agents');
+    await db.run('DELETE FROM rooms');
+    await db.run('DELETE FROM sqlite_sequence');
+    bot.sendMessage(msg.chat.id, "✅ Database wiped.");
 });
-
-// /reset_clients - Wipe only users and rooms, keep agents
 bot.onText(/\/reset_clients/, async (msg) => {
     if (msg.chat.id !== ADMIN_ID) return;
-    try {
-        if (!db) return bot.sendMessage(ADMIN_ID, "Database not ready.");
-
-        await db.run('DELETE FROM users');
-        await db.run('DELETE FROM rooms');
-        bot.sendMessage(ADMIN_ID, "✅ **Clients Wiped.**\nAll user accounts and chats deleted.\nModels are SAFE.");
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-    }
+    await db.run('DELETE FROM users');
+    await db.run('DELETE FROM rooms');
+    bot.sendMessage(ADMIN_ID, "✅ Clients wiped, agents kept.");
 });
 
 // ----------------------------------------------------------------------
-// MAIN MESSAGE HANDLER (for non-command messages and web_app_data)
+// ADMIN FLOW HANDLER (modified to store file_id)
 // ----------------------------------------------------------------------
 bot.on('message', async (msg) => {
-    // Ignore commands (they are handled by onText)
-    if (msg.text && msg.text.startsWith('/')) return;
-
-    const userId = msg.chat.id;
-
-    // 1. Admin editing flow
-    if (userId === ADMIN_ID && adminState[ADMIN_ID]) {
-        await handleAdminFlow(msg);
-        return;
-    }
-
-    // 2. WebApp data
-    if (msg.web_app_data) {
-        await handleWebAppData(msg);
-        return;
-    }
-
-    // 3. Regular chat (user in a room)
-    await handleRegularChat(msg);
-});
-
-// ----------------------------------------------------------------------
-// ADMIN FLOW HANDLER (state machine)
-// ----------------------------------------------------------------------
-async function handleAdminFlow(msg) {
+    if (msg.chat.id !== ADMIN_ID || !adminState[ADMIN_ID]) return;
     const state = adminState[ADMIN_ID];
-    if (!state) return;
 
-    try {
-        // STEP: CREATE_NAME
-        if (state.step === 'CREATE_NAME') {
-            const name = msg.text;
-            try {
-                const result = await db.run('INSERT INTO agents (name) VALUES (?)', name);
-                adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: result.lastID };
-                bot.sendMessage(ADMIN_ID, `✅ Created **${name}**.\n\nNow upload **Photo #1** (Main).`);
-            } catch (e) {
-                bot.sendMessage(ADMIN_ID, `❌ Error: Name "${name}" already exists.`);
-                delete adminState[ADMIN_ID];
-            }
-            return;
-        }
-
-        // STEP: EDIT_AGE
-        if (state.step === 'EDIT_AGE') {
-            const age = parseInt(msg.text);
-            if (!isNaN(age)) {
-                await db.run('UPDATE agents SET age = ? WHERE id = ?', [age, state.agent_id]);
-                adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: state.agent_id };
-                bot.sendMessage(ADMIN_ID, "✅ Age Updated.\n\nNow upload **Photo #1** (or type 'skip').");
-            } else {
-                bot.sendMessage(ADMIN_ID, "⚠️ Please enter a number for Age.");
-            }
-            return;
-        }
-
-        // STEP: EDIT_photos_1, EDIT_photos_2, EDIT_photos_3
-        if (state.step.startsWith('EDIT_photos_')) {
-            const photoIndex = state.step.split('_')[2]; // "1", "2", or "3"
-            const colName = `photo${photoIndex}`;
-
-            // Handle "skip"
-            if (msg.text && msg.text.toLowerCase() === 'skip') {
-                return advancePhotoStep(state.agent_id, parseInt(photoIndex));
-            }
-
-            // Handle photo upload
-            if (msg.photo) {
-                const fileId = msg.photo[msg.photo.length - 1].file_id;
-                const fileName = `agent_${state.agent_id}_p${photoIndex}_${Date.now()}.jpg`;
-
-                const success = await downloadTelegramFile(fileId, fileName);
-                if (success) {
-                    await db.run(`UPDATE agents SET ${colName} = ? WHERE id = ?`, [fileName, state.agent_id]);
-                    bot.sendMessage(ADMIN_ID, `✅ Photo ${photoIndex} Saved.`);
-                    return advancePhotoStep(state.agent_id, parseInt(photoIndex));
-                } else {
-                    bot.sendMessage(ADMIN_ID, "❌ Failed to download. Try again.");
-                }
-                return;
-            }
-
-            bot.sendMessage(ADMIN_ID, "⚠️ Please send a photo (compressed) or type 'skip'.");
-        }
-    } catch (e) {
-        bot.sendMessage(ADMIN_ID, `❌ Error: ${e.message}`);
-        delete adminState[ADMIN_ID];
-    }
-}
-
-// ----------------------------------------------------------------------
-// WEBAPP DATA HANDLER (with fallback user creation)
-// ----------------------------------------------------------------------
-async function handleWebAppData(msg) {
-    const userId = msg.chat.id;
-    let data;
-    try {
-        data = JSON.parse(msg.web_app_data.data);
-    } catch (e) {
-        console.error("Failed to parse webapp data:", e);
-        return;
-    }
-
-    try {
-        if (!db) return bot.sendMessage(userId, "System initializing, try again later.");
-
-        // REGISTRATION
-        if (data.action === 'register_new_user') {
-            const { age, country, photo_url } = data.user_data || {};
-            await db.run(`
-                INSERT INTO users (user_id, first_name, credits, profile_photo)
-                VALUES (?, ?, 50, ?)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    credits = 50,
-                    profile_photo = ?
-            `, [userId, msg.from.first_name, photo_url || null, photo_url || null]);
-
-            if (photo_url) {
-                bot.sendMessage(ADMIN_ID, `🆕 **New Client:** ${msg.from.first_name} (${age || '?'}, ${country || '?'})\nPhoto: ${photo_url}`);
-            }
-            return bot.sendMessage(userId, `✅ **Profile Saved!**\n💰 50 Free Credits added.`);
-        }
-
-        // AGENT SELECTION (with fallback user creation)
-        if (data.action === 'select_agent' && data.agent_id) {
-            const agent = await db.get('SELECT * FROM agents WHERE id = ?', data.agent_id);
-            if (!agent) return;
-
-            // Ensure user exists (fallback in case record was deleted)
-            let user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
-            if (!user) {
-                await db.run(
-                    `INSERT INTO users (user_id, first_name, credits) VALUES (?, ?, 0)`,
-                    [userId, msg.from.first_name || 'User']
-                );
-                user = { credits: 0 };
-            }
-
-            await db.run(`
-                INSERT OR IGNORE INTO rooms (user_id, agent_id) VALUES (?, ?)
-            `, [userId, agent.id]);
-
-            await db.run(`
-                UPDATE users SET active_room_id = (
-                    SELECT id FROM rooms WHERE user_id = ? AND agent_id = ?
-                ) WHERE user_id = ?
-            `, [userId, agent.id, userId]);
-
-            if (user.credits > 0) {
-                bot.sendMessage(userId, `💬 **Connected with ${agent.name}.**`, {
-                    reply_markup: {
-                        keyboard: [['📸 Pic (15)', '🎥 Video (50)'], ['🎁 Gift (5)', '💳 Balance'], ['❌ Leave Chat']],
-                        resize_keyboard: true
-                    }
-                });
-            } else {
-                bot.sendMessage(userId, `🔒 **Locked.** Please top up.`);
-            }
-        }
-    } catch (e) {
-        console.error("WebApp Data Error:", e);
-        bot.sendMessage(userId, "An error occurred. Please try again.");
-    }
-}
-
-// ----------------------------------------------------------------------
-// REGULAR CHAT HANDLER (user in a room)
-// ----------------------------------------------------------------------
-async function handleRegularChat(msg) {
-    const userId = msg.chat.id;
-
-    // Admin replying to a user (via reply)
-    if (userId === ADMIN_ID && msg.reply_to_message) {
-        const match = msg.reply_to_message.text.match(/🆔 ID: (\d+)/);
-        if (match) {
-            bot.sendMessage(match[1], msg.text);
+    // Handle CREATE_NAME
+    if (state.step === 'CREATE_NAME') {
+        try {
+            const result = await db.run('INSERT INTO agents (name) VALUES (?)', msg.text);
+            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: result.lastID };
+            bot.sendMessage(ADMIN_ID, `✅ Created. Now send **Photo #1** (or type 'skip').`);
+        } catch (e) {
+            bot.sendMessage(ADMIN_ID, "❌ Name already exists.");
+            delete adminState[ADMIN_ID];
         }
         return;
     }
 
-    // User chatting
-    try {
-        if (!db) return bot.sendMessage(userId, "System initializing, try again later.");
-
-        const user = await db.get(`
-            SELECT u.credits, a.name, a.is_online, a.photo1, u.active_room_id
-            FROM users u
-            JOIN rooms r ON u.active_room_id = r.id
-            JOIN agents a ON r.agent_id = a.id
-            WHERE u.user_id = ?
-        `, userId);
-
-        if (!user) {
-            // Not in a room – maybe they sent a command-like message?
-            if (msg.text === '💳 Balance') {
-                const c = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
-                return bot.sendMessage(userId, `Credits: ${c?.credits || 0}`);
-            }
-            return;
-        }
-
-        // Handle special buttons
-        if (msg.text === '❌ Leave Chat') {
-            await db.run('UPDATE users SET active_room_id = NULL WHERE user_id = ?', userId);
-            return bot.sendMessage(userId, "👋 Chat closed.", { reply_markup: { remove_keyboard: true } });
-        }
-
-        if (msg.text && msg.text.includes('📸 Pic')) {
-            if (user.credits < 15) return bot.sendMessage(userId, "❌ Low balance.");
-            await db.run('UPDATE users SET credits = credits - 15 WHERE user_id = ?', userId);
-
-            const photoUrl = user.photo1 ? `${SERVER_URL}/uploads/${user.photo1}` : null;
-            if (!photoUrl) return bot.sendMessage(userId, "No photo available.");
-
-            bot.sendMessage(userId, "😘 *Sending private pic...*", { parse_mode: 'Markdown' });
-            setTimeout(() => bot.sendPhoto(userId, photoUrl), 1000);
-            return;
-        }
-
-        // Text message – deduct 1 credit
-        if (user.credits <= 0) return bot.sendMessage(userId, "🔒 No credits.");
-        await db.run('UPDATE users SET credits = credits - 1 WHERE user_id = ?', userId);
-
-        if (user.is_online) {
-            // Forward to admin
-            const forward = `🔌 **${user.name}** (User: ${msg.from.first_name})\n🆔 ID: ${userId}\n\n"${msg.text}"`;
-            bot.sendMessage(ADMIN_ID, forward);
+    // Handle EDIT_AGE
+    if (state.step === 'EDIT_AGE') {
+        const age = parseInt(msg.text);
+        if (!isNaN(age)) {
+            await db.run('UPDATE agents SET age = ? WHERE id = ?', [age, state.agent_id]);
+            adminState[ADMIN_ID] = { step: 'EDIT_photos_1', agent_id: state.agent_id };
+            bot.sendMessage(ADMIN_ID, "✅ Age updated. Now send **Photo #1** (or 'skip').");
         } else {
-            // AI placeholder
-            bot.sendChatAction(userId, 'typing');
-            setTimeout(() => bot.sendMessage(userId, "I'm listening... tell me more."), 2000);
+            bot.sendMessage(ADMIN_ID, "⚠️ Please enter a number.");
         }
-    } catch (e) {
-        console.error("Regular chat error:", e);
+        return;
     }
-}
 
-// ----------------------------------------------------------------------
-// API ENDPOINTS
-// ----------------------------------------------------------------------
+    // Handle photos
+    if (state.step.startsWith('EDIT_photos_')) {
+        const idx = state.step.split('_')[2];
+        const col = `photo${idx}_file_id`;
 
-// Get list of agents for the Web App
-app.get('/api/agents', async (req, res) => {
-    try {
-        if (!db) return res.status(503).json({ error: "Database not ready" });
+        if (msg.text && msg.text.toLowerCase() === 'skip') {
+            // Advance to next step
+            if (parseInt(idx) < 3) {
+                adminState[ADMIN_ID] = { step: `EDIT_photos_${parseInt(idx)+1}`, agent_id: state.agent_id };
+                bot.sendMessage(ADMIN_ID, `Send **Photo #${parseInt(idx)+1}** (or 'skip').`);
+            } else {
+                delete adminState[ADMIN_ID];
+                bot.sendMessage(ADMIN_ID, "🎉 Agent setup complete!");
+            }
+            return;
+        }
 
-        const agents = await db.all('SELECT * FROM agents');
-        const formatted = agents.map(a => ({
-            id: a.id,
-            name: a.name,
-            age: a.age || 23,
-            location: a.location || 'Unknown',
-            verified: true,
-            premium: true,
-            photo: a.photo1 ? `${SERVER_URL}/uploads/${a.photo1}` : 'https://placehold.co/400x500',
-            gallery: [a.photo1, a.photo2, a.photo3].filter(p => p).map(p => `${SERVER_URL}/uploads/${p}`),
-            stats: { rating: '5.0', chats: `${100 * a.id}k` }
-        }));
-        res.json(formatted);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
+        if (msg.photo) {
+            const fileId = msg.photo[msg.photo.length - 1].file_id;
+            await db.run(`UPDATE agents SET ${col} = ? WHERE id = ?`, [fileId, state.agent_id]);
+            bot.sendMessage(ADMIN_ID, `✅ Photo ${idx} saved.`);
+
+            // Advance
+            if (parseInt(idx) < 3) {
+                adminState[ADMIN_ID] = { step: `EDIT_photos_${parseInt(idx)+1}`, agent_id: state.agent_id };
+                bot.sendMessage(ADMIN_ID, `Send **Photo #${parseInt(idx)+1}** (or 'skip').`);
+            } else {
+                delete adminState[ADMIN_ID];
+                bot.sendMessage(ADMIN_ID, "🎉 Agent setup complete!");
+            }
+        } else {
+            bot.sendMessage(ADMIN_ID, "Please send a photo or type 'skip'.");
+        }
     }
 });
 
-// Client photo upload endpoint (called from Web App)
-app.post('/api/upload_client', upload.single('photo'), (req, res) => {
-    if (req.file) {
-        res.json({ url: `${SERVER_URL}/uploads/${req.file.filename}` });
+// ----------------------------------------------------------------------
+// REGULAR CHAT HANDLER (when user is in a room)
+// ----------------------------------------------------------------------
+bot.on('message', async (msg) => {
+    if (!msg.text || msg.text.startsWith('/')) return;
+    const userId = msg.chat.id;
+
+    // Ignore if user is in registration or admin flow
+    if (userState[userId]) return;
+    if (userId === ADMIN_ID && adminState[ADMIN_ID]) return;
+
+    // Check if user is in an active room
+    const room = await db.get(`
+        SELECT r.*, a.name, a.is_online, a.photo1_file_id
+        FROM rooms r
+        JOIN agents a ON r.agent_id = a.id
+        WHERE r.user_id = ? AND r.id = (SELECT active_room_id FROM users WHERE user_id = ?)
+    `, [userId, userId]);
+
+    if (!room) return;
+
+    // Deduct 1 credit for text message
+    const user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
+    if (user.credits <= 0) {
+        return bot.sendMessage(userId, "🔒 No credits. Top up to continue.");
+    }
+    await db.run('UPDATE users SET credits = credits - 1 WHERE user_id = ?', userId);
+
+    if (room.is_online) {
+        // Forward to admin
+        const forwardMsg = `🔌 **${room.name}** (User: ${msg.from.first_name})\n🆔 ID: ${userId}\n\n"${msg.text}"`;
+        bot.sendMessage(ADMIN_ID, forwardMsg);
     } else {
-        res.status(400).send("Error");
+        // AI placeholder
+        bot.sendChatAction(userId, 'typing');
+        setTimeout(() => bot.sendMessage(userId, "I'm listening... tell me more."), 2000);
     }
 });
 
-// NEW: Check if a user exists in the database
-app.get('/api/user/:userId', async (req, res) => {
-    try {
-        const user = await db.get('SELECT user_id FROM users WHERE user_id = ?', req.params.userId);
-        res.json({ exists: !!user });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// ----------------------------------------------------------------------
-// START SERVER
-// ----------------------------------------------------------------------
-app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
+console.log("🤖 Bot is running...");
