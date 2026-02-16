@@ -1,7 +1,7 @@
 /**
- * FLIRTU-STYLE BOT — INLINE KEYBOARD VERSION
- * Features: User registration, Browse agents, Chat with credits, Admin management
- * No web app, pure Telegram inline keyboards.
+ * SYNC HEARTS — FLIRTU-STYLE BOT
+ * Features: Inline keyboard registration, browse agents, chat with credits, admin management.
+ * No web app, pure Telegram interface.
  */
 
 require('dotenv').config();
@@ -32,7 +32,7 @@ console.log("🤖 Bot started with polling");
 let db;
 
 (async () => {
-    db = await open({ filename: './flirtu.db', driver: sqlite3.Database });
+    db = await open({ filename: './sync_hearts.db', driver: sqlite3.Database });
 
     await db.exec(`
         CREATE TABLE IF NOT EXISTS users (
@@ -56,11 +56,10 @@ let db;
             name TEXT UNIQUE,
             age INTEGER DEFAULT 23,
             location TEXT DEFAULT 'Paris',
-            photo_file_id TEXT,
+            photo1_file_id TEXT,
             photo2_file_id TEXT,
             photo3_file_id TEXT,
-            is_online INTEGER DEFAULT 0,
-            admin_chat_id INTEGER
+            is_online INTEGER DEFAULT 0
         );
     `);
 
@@ -79,14 +78,10 @@ let db;
 })();
 
 // ----------------------------------------------------------------------
-// USER STATE MACHINE (for registration)
+// STATE MACHINES
 // ----------------------------------------------------------------------
-const userState = {}; // { userId: { step: 'awaiting_name', data: {} } }
-
-// ----------------------------------------------------------------------
-// ADMIN STATE MACHINE (unchanged)
-// ----------------------------------------------------------------------
-const adminState = {};
+const userState = {};      // { userId: { step, data } } for registration
+const adminState = {};     // { [ADMIN_ID]: { step, agent_id } } for admin flows
 
 // ----------------------------------------------------------------------
 // HELPER FUNCTIONS
@@ -106,34 +101,34 @@ bot.onText(/\/start/, async (msg) => {
     const username = msg.from.username || '';
 
     try {
-        // Check if user exists and is registered
         let user = await db.get('SELECT * FROM users WHERE user_id = ?', userId);
 
         if (!user) {
-            // New user: insert placeholder and start registration
             await db.run(
                 `INSERT INTO users (user_id, first_name, username, credits, registered) VALUES (?, ?, ?, 0, 0)`,
                 [userId, firstName, username]
             );
             userState[userId] = { step: 'awaiting_name', data: {} };
-            return bot.sendMessage(userId, "🌸 Welcome to Flirtu! Let's set up your profile.\n\nPlease enter your **first name**:", { parse_mode: 'Markdown' });
+            return bot.sendMessage(userId, 
+                "🌸 Welcome to Sync Hearts! Let's set up your profile.\n\nPlease enter your **first name**:", 
+                { parse_mode: 'Markdown' });
         }
 
         if (!user.registered) {
-            // User exists but not fully registered (e.g., interrupted flow)
             userState[userId] = { step: 'awaiting_name', data: {} };
-            return bot.sendMessage(userId, "Let's complete your registration.\n\nPlease enter your **first name**:", { parse_mode: 'Markdown' });
+            return bot.sendMessage(userId, 
+                "Let's complete your registration.\n\nPlease enter your **first name**:", 
+                { parse_mode: 'Markdown' });
         }
 
-        // Registered user → show main menu
-        await showMainMenu(userId, firstName);
+        await showMainMenu(userId, user.first_name);
     } catch (e) {
         console.error("Start error:", e);
         bot.sendMessage(userId, "An error occurred. Please try again later.");
     }
 });
 
-// Show main menu with inline keyboard
+// Show main menu
 async function showMainMenu(userId, firstName) {
     const user = await db.get('SELECT credits FROM users WHERE user_id = ?', userId);
     const credits = user ? user.credits : 0;
@@ -157,17 +152,16 @@ async function showMainMenu(userId, firstName) {
 // ----------------------------------------------------------------------
 bot.on('message', async (msg) => {
     const userId = msg.chat.id;
-    if (msg.text && msg.text.startsWith('/')) return; // ignore commands
+    if (msg.text && msg.text.startsWith('/')) return;
 
-    // 1. Check admin editing flow first
+    // Admin flow takes priority
     if (userId === ADMIN_ID && adminState[ADMIN_ID]) {
         await handleAdminFlow(msg);
         return;
     }
 
-    // 2. Check user registration state
     const state = userState[userId];
-    if (!state) return; // not in registration
+    if (!state) return;
 
     try {
         switch (state.step) {
@@ -192,7 +186,8 @@ bot.on('message', async (msg) => {
                         [{ text: "👨 Male", callback_data: "gender_male" }, { text: "👩 Female", callback_data: "gender_female" }]
                     ]
                 };
-                return bot.sendMessage(userId, "Select your **gender**:", { parse_mode: 'Markdown', reply_markup: genderKeyboard });
+                return bot.sendMessage(userId, "Select your **gender**:", 
+                    { parse_mode: 'Markdown', reply_markup: genderKeyboard });
 
             case 'awaiting_location':
                 const location = msg.text;
@@ -205,7 +200,6 @@ bot.on('message', async (msg) => {
 
             case 'awaiting_photo':
                 if (msg.text && msg.text.toLowerCase() === '/skip') {
-                    // Skip photo
                     await completeRegistration(userId, state.data, null);
                     delete userState[userId];
                 } else if (msg.photo) {
@@ -224,7 +218,7 @@ bot.on('message', async (msg) => {
     }
 });
 
-// Complete registration, save to DB, give starting credits
+// Complete registration
 async function completeRegistration(userId, data, photoFileId) {
     await db.run(
         `UPDATE users SET 
@@ -233,13 +227,12 @@ async function completeRegistration(userId, data, photoFileId) {
         [data.name, data.age, data.gender, data.location, photoFileId, userId]
     );
 
-    // Notify admin about new user
+    // Notify admin
     const userInfo = await db.get('SELECT * FROM users WHERE user_id = ?', userId);
     let adminMsg = `🆕 **New User Registered**\n\nName: ${userInfo.first_name}\nAge: ${userInfo.age}\nGender: ${userInfo.gender}\nLocation: ${userInfo.location}`;
     if (photoFileId) adminMsg += `\nPhoto received.`;
     bot.sendMessage(ADMIN_ID, adminMsg, { parse_mode: 'Markdown' });
 
-    // Welcome user
     bot.sendMessage(userId, `✅ **Registration complete!**\n💰 You received **50 free credits**.\n\nUse /start to begin.`);
     await showMainMenu(userId, data.name);
 }
@@ -253,9 +246,9 @@ bot.on('callback_query', async (callbackQuery) => {
     const data = callbackQuery.data;
 
     try {
-        // Handle registration gender selection
+        // Registration gender selection
         if (data.startsWith('gender_')) {
-            const gender = data.split('_')[1]; // 'male' or 'female'
+            const gender = data.split('_')[1];
             const state = userState[userId];
             if (state && state.step === 'awaiting_gender') {
                 state.data.gender = gender;
@@ -265,7 +258,7 @@ bot.on('callback_query', async (callbackQuery) => {
                     chat_id: userId,
                     message_id: msg.message_id,
                     parse_mode: 'Markdown',
-                    reply_markup: { inline_keyboard: [] } // remove keyboard
+                    reply_markup: { inline_keyboard: [] }
                 });
             } else {
                 await bot.answerCallbackQuery(callbackQuery.id, { text: "Session expired. Use /start" });
@@ -309,7 +302,7 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 });
 
-// Browse agents - show list with inline buttons
+// Browse agents
 async function browseAgents(userId, msg) {
     const agents = await db.all('SELECT id, name, age, location FROM agents');
     if (agents.length === 0) {
@@ -328,7 +321,7 @@ async function browseAgents(userId, msg) {
     });
 }
 
-// Show user profile
+// Show profile
 async function showProfile(userId, msg) {
     const user = await db.get('SELECT * FROM users WHERE user_id = ?', userId);
     if (!user) return bot.sendMessage(userId, "User not found.");
@@ -352,7 +345,7 @@ async function showBalance(userId, msg) {
     bot.sendMessage(userId, `💰 Your balance: **${user.credits} credits**`, { parse_mode: 'Markdown' });
 }
 
-// Claim daily bonus (simple: once per day)
+// Claim daily bonus
 async function claimDailyBonus(userId, msg) {
     const today = new Date().toISOString().split('T')[0];
     const user = await db.get('SELECT last_daily FROM users WHERE user_id = ?', userId);
@@ -373,7 +366,6 @@ async function selectAgent(userId, agentId, msg) {
     // Ensure user exists (should, but just in case)
     let user = await db.get('SELECT * FROM users WHERE user_id = ?', userId);
     if (!user) {
-        // very unlikely, but create minimal
         await db.run('INSERT INTO users (user_id, first_name, credits, registered) VALUES (?, ?, 0, 1)', [userId, 'User']);
         user = await db.get('SELECT * FROM users WHERE user_id = ?', userId);
     }
@@ -389,7 +381,6 @@ async function selectAgent(userId, agentId, msg) {
         ) WHERE user_id = ?
     `, [userId, agent.id, userId]);
 
-    // Send agent intro and chat keyboard
     const intro = `💬 **Connected with ${agent.name}**\n\nYou can now chat. Each message costs 1 credit.\nUse the buttons below for special actions.`;
 
     const keyboard = {
@@ -410,7 +401,7 @@ async function selectAgent(userId, agentId, msg) {
 // ----------------------------------------------------------------------
 bot.on('message', async (msg) => {
     const userId = msg.chat.id;
-    if (msg.text && msg.text.startsWith('/')) return; // commands handled separately
+    if (msg.text && msg.text.startsWith('/')) return;
     if (userState[userId]) return; // registration in progress
 
     // Admin replying to a user (via reply)
@@ -425,7 +416,7 @@ bot.on('message', async (msg) => {
     // User chatting
     try {
         const user = await db.get(`
-            SELECT u.credits, a.name, a.is_online, a.photo_file_id, u.active_room_id
+            SELECT u.credits, a.name, a.is_online, a.photo1_file_id, u.active_room_id
             FROM users u
             JOIN rooms r ON u.active_room_id = r.id
             JOIN agents a ON r.agent_id = a.id
@@ -449,9 +440,9 @@ bot.on('message', async (msg) => {
             if (user.credits < 15) return bot.sendMessage(userId, "❌ Low balance.");
             await db.run('UPDATE users SET credits = credits - 15 WHERE user_id = ?', userId);
 
-            if (user.photo_file_id) {
+            if (user.photo1_file_id) {
                 bot.sendMessage(userId, "😘 *Sending private pic...*", { parse_mode: 'Markdown' });
-                setTimeout(() => bot.sendPhoto(userId, user.photo_file_id), 1000);
+                setTimeout(() => bot.sendPhoto(userId, user.photo1_file_id), 1000);
             } else {
                 bot.sendMessage(userId, "No photo available.");
             }
@@ -482,26 +473,8 @@ bot.on('message', async (msg) => {
 });
 
 // ----------------------------------------------------------------------
-// ADMIN COMMANDS (mostly unchanged, but adapt to file_id)
+// ADMIN FLOW HANDLER
 // ----------------------------------------------------------------------
-
-// /create - Admin creates a new agent
-bot.onText(/\/create/, async (msg) => {
-    if (msg.chat.id !== ADMIN_ID) return;
-    adminState[ADMIN_ID] = { step: 'CREATE_NAME' };
-    bot.sendMessage(ADMIN_ID, "🆕 **Create New Model**\n\nPlease enter the **Name**:", { parse_mode: 'Markdown' });
-});
-
-// /edit, /delete, /list, /online, /offline, /wipe, /reset – same as before but adapt photo handling
-// For brevity, I'll keep them as before, but modify photo storage to file_id instead of filename.
-
-// ... (admin commands similar to original, but in downloadTelegramFile we now just store file_id)
-// We'll rewrite the admin photo handling to store file_id directly.
-
-// For admin flow, we need to modify handleAdminFlow to store file_id instead of downloading.
-// Let's create a simplified version.
-
-// Admin state machine (updated for file_id)
 async function handleAdminFlow(msg) {
     const state = adminState[ADMIN_ID];
     if (!state) return;
@@ -566,11 +539,16 @@ function advancePhotoStep(agentId, currentStep) {
     }
 }
 
-// Keep existing admin commands: /edit, /delete, /list, /online, /offline, /wipe_all_data, /confirm_wipe, /reset_clients
-// They remain unchanged except for referencing correct columns.
+// ----------------------------------------------------------------------
+// ADMIN COMMANDS (unchanged from original, adapted to new column names)
+// ----------------------------------------------------------------------
 
-// (Copy the admin command handlers from original, adjusting column names if needed)
-// For brevity, I'll include them with minimal changes.
+// /create - Admin creates a new agent
+bot.onText(/\/create/, async (msg) => {
+    if (msg.chat.id !== ADMIN_ID) return;
+    adminState[ADMIN_ID] = { step: 'CREATE_NAME' };
+    bot.sendMessage(ADMIN_ID, "🆕 **Create New Model**\n\nPlease enter the **Name**:", { parse_mode: 'Markdown' });
+});
 
 // /edit <name> - Admin edits an existing agent
 bot.onText(/\/edit (.+)/, async (msg, match) => {
@@ -690,7 +668,7 @@ bot.onText(/\/reset_clients/, async (msg) => {
 });
 
 // ----------------------------------------------------------------------
-// MESSAGE HANDLER FOR ADMIN FLOW
+// MESSAGE HANDLER FOR ADMIN FLOW (redundant but safe)
 // ----------------------------------------------------------------------
 bot.on('message', async (msg) => {
     if (msg.chat.id === ADMIN_ID && adminState[ADMIN_ID]) {
@@ -698,4 +676,4 @@ bot.on('message', async (msg) => {
     }
 });
 
-console.log("✅ Bot is running...");
+console.log("✅ Sync Hearts bot is running...");
